@@ -25,6 +25,11 @@ Checkpoint files go in
 exactly one checkpoint and then stops. Application code and tests remain at the
 project root; they never move into the design or checkpoint directories.
 
+Listener 000 through listener 004 implement the four layers and are already
+reviewed. Listener 005 corrects history drawing, as specified in section 6 and
+section 7.6. It adds no command and does not change process enumeration, hit
+testing, the 500-row retention limit, or the command text stored for a process.
+
 ## 1. Product boundary
 
 The listener starts with the process's current working directory. It enters the
@@ -516,11 +521,18 @@ The non-presentation UI objects are:
   cursor, and an optional atomic chip.
 
 There is never a `Button`, `Label`, `Static`, or other widget per file,
-directory, process, or presentation. `HistorySurface` builds one Rich `Text`
-renderable from the pure layout. Presented fragments carry presentation ids,
-so styling is applied to the corresponding Rich character spans while the
-separate display-cell intervals remain the authority for hit testing; codepoint
-indices and display-column indices are not interchanged.
+directory, process, or presentation. `HistorySurface` draws the history as
+Rich `Text`, one object per physical row, built directly from that row's
+pure-layout fragments. It must not produce those row texts by slicing one
+accumulated history-wide `Text`. A history-wide `Text` may still exist, but
+it is not the source of the per-row texts.
+
+Hover and accept-target styling touch only the physical rows occupied by the
+presentation being left and the presentation being entered. A hover must not
+rebuild or slice every retained row. Presented fragments carry presentation
+ids, so styling is applied to the corresponding Rich character spans of those
+rows, while the separate display-cell intervals remain the authority for hit
+testing. Codepoint indices and display-column indices are not interchanged.
 
 ### 6.1 Prompt and editor
 
@@ -732,6 +744,15 @@ documentation widgets remain mounted.
 
 This required test does not synthesize a mouse click. Mouse-coordinate behavior
 is covered by pure hit-test tests and the hand check.
+
+### 7.6 History-drawing regression
+
+`tests/test_terminal.py` must include a case with hundreds of process rows and
+long command lines. Construct that history directly, or through the headless
+listener with an injected process table. Do not scan the live `/proc`.
+
+The case must show that changing the hovered presentation does not rebuild or
+slice every retained physical row. Do not assert a wall-clock duration.
 
 Run all tests with:
 

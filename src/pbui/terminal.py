@@ -14,7 +14,7 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.geometry import Offset, Size
+from textual.geometry import Offset, Region, Size
 from textual.screen import Screen
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
@@ -323,27 +323,22 @@ def _interval_character_ranges(
     return tuple(ranges)
 
 
-def build_history_text(
-    listener: HeadlessListener,
+StyledInterval = tuple[int, int, int, Presentation, DisplayInterval]
+
+
+def _styled_intervals_by_row(
     current_layout: Layout,
-    hovered_presentation: Presentation | None = None,
-) -> Text:
-    """Build the single literal Rich renderable for a complete pure layout."""
+) -> tuple[tuple[StyledInterval, ...], ...]:
+    """Index presentation intervals in their deterministic drawing order."""
 
-    row_texts = tuple(row.text for row in current_layout.rows)
-    row_offsets: list[int] = []
-    offset = 0
-    for row_text in row_texts:
-        row_offsets.append(offset)
-        offset += len(row_text) + 1
-
-    renderable = Text("\n".join(row_texts), no_wrap=True, overflow="crop")
-    styled_intervals: list[
-        tuple[int, int, int, Presentation, DisplayInterval]
-    ] = []
+    intervals_by_row: list[list[StyledInterval]] = [
+        [] for _ in current_layout.rows
+    ]
     for presentation_index, presentation in enumerate(current_layout.presentations):
         for interval in presentation.intervals:
-            styled_intervals.append(
+            if interval.physical_row >= len(intervals_by_row):
+                continue
+            intervals_by_row[interval.physical_row].append(
                 (
                     interval.nesting_depth,
                     interval.draw_order,
@@ -352,16 +347,61 @@ def build_history_text(
                     interval,
                 )
             )
+    return tuple(tuple(sorted(intervals)) for intervals in intervals_by_row)
 
-    for _, _, _, presentation, interval in sorted(styled_intervals):
-        if interval.physical_row >= len(row_texts):
-            continue
+
+def build_history_row_text(
+    listener: HeadlessListener,
+    current_layout: Layout,
+    physical_row: int,
+    hovered_presentation: Presentation | None = None,
+    *,
+    styled_intervals: tuple[StyledInterval, ...] | None = None,
+) -> Text:
+    """Build one Rich renderable directly from one pure-layout row."""
+
+    row_text = current_layout.rows[physical_row].text
+    renderable = Text(row_text, no_wrap=True, overflow="crop")
+    if styled_intervals is None:
+        styled_intervals = _styled_intervals_by_row(current_layout)[physical_row]
+
+    for _, _, _, presentation, interval in styled_intervals:
         style = presentation_style(listener, presentation, hovered_presentation)
-        row_text = row_texts[interval.physical_row]
-        row_offset = row_offsets[interval.physical_row]
         for start, end in _interval_character_ranges(row_text, interval):
-            renderable.stylize(style, row_offset + start, row_offset + end)
+            renderable.stylize(style, start, end)
     return renderable
+
+
+def _compose_history_text(line_texts: list[Text] | tuple[Text, ...]) -> Text:
+    """Compose the compatibility view from independently built row objects."""
+
+    renderable = Text(no_wrap=True, overflow="crop")
+    for physical_row, line in enumerate(line_texts):
+        if physical_row:
+            renderable.append("\n")
+        renderable.append(line)
+    return renderable
+
+
+def build_history_text(
+    listener: HeadlessListener,
+    current_layout: Layout,
+    hovered_presentation: Presentation | None = None,
+) -> Text:
+    """Build the compatibility view from direct per-row Rich renderables."""
+
+    intervals_by_row = _styled_intervals_by_row(current_layout)
+    line_texts = [
+        build_history_row_text(
+            listener,
+            current_layout,
+            physical_row,
+            hovered_presentation,
+            styled_intervals=intervals_by_row[physical_row],
+        )
+        for physical_row in range(len(current_layout.rows))
+    ]
+    return _compose_history_text(line_texts)
 
 
 class HistorySurface(ScrollView):
@@ -385,13 +425,13 @@ class HistorySurface(ScrollView):
         self.current_layout = layout(listener.history, 1)
         self.hovered_presentation: Presentation | None = None
         self._pointer_offset: Offset | None = None
-        self.history_text = build_history_text(listener, self.current_layout)
-        self._line_texts: tuple[Text, ...] = ()
+        self._styled_intervals = _styled_intervals_by_row(self.current_layout)
+        self._line_texts = self._build_all_rows()
+        self.history_text = _compose_history_text(self._line_texts)
         self._logical_rows = listener.history.rows
         self._history_revision = -1
         self._content_width = 0
         self._pending_request: object = _UNSET
-        self._update_line_texts()
 
     @property
     def history_layout(self) -> Layout:
@@ -407,13 +447,33 @@ class HistorySurface(ScrollView):
             return max(1, self._content_width)
         return max(1, self.scrollable_content_region.width)
 
-    def _update_line_texts(self) -> None:
-        lines: list[Text] = []
-        offset = 0
-        for row in self.current_layout.rows:
-            lines.append(self.history_text[offset : offset + len(row.text)])
-            offset += len(row.text) + 1
-        self._line_texts = tuple(lines)
+    def _build_row(self, physical_row: int) -> Text:
+        return build_history_row_text(
+            self.listener,
+            self.current_layout,
+            physical_row,
+            self.hovered_presentation,
+            styled_intervals=self._styled_intervals[physical_row],
+        )
+
+    def _build_all_rows(self) -> list[Text]:
+        return [self._build_row(row) for row in range(len(self.current_layout.rows))]
+
+    def _refresh_physical_rows(self, physical_rows: set[int]) -> None:
+        """Repaint only affected rows that are currently in the viewport."""
+
+        if not self.is_mounted:
+            self.refresh()
+            return
+        scroll_y = self.scroll_offset.y
+        content_region = self.scrollable_content_region
+        regions = tuple(
+            Region(0, physical_row - scroll_y, content_region.width, 1)
+            for physical_row in sorted(physical_rows)
+            if scroll_y <= physical_row < scroll_y + content_region.height
+        )
+        if regions:
+            self.refresh(*regions)
 
     def _oldest_visible_logical_row(self) -> object | None:
         if not self.current_layout.rows or not self._logical_rows:
@@ -550,10 +610,9 @@ class HistorySurface(ScrollView):
                 self.hovered_presentation = None
         elif self.hovered_presentation not in retained:
             self.hovered_presentation = None
-        self.history_text = build_history_text(
-            self.listener, self.current_layout, self.hovered_presentation
-        )
-        self._update_line_texts()
+        self._styled_intervals = _styled_intervals_by_row(self.current_layout)
+        self._line_texts = self._build_all_rows()
+        self.history_text = _compose_history_text(self._line_texts)
         self.refresh(layout=True)
         self._refresh_documentation()
         return True
@@ -572,12 +631,18 @@ class HistorySurface(ScrollView):
             presentation = None
         if presentation is self.hovered_presentation:
             return
+        previous = self.hovered_presentation
         self.hovered_presentation = presentation
-        self.history_text = build_history_text(
-            self.listener, self.current_layout, presentation
-        )
-        self._update_line_texts()
-        self.refresh()
+        physical_rows = {
+            interval.physical_row
+            for item in (previous, presentation)
+            if item is not None
+            for interval in item.intervals
+        }
+        for physical_row in sorted(physical_rows):
+            if 0 <= physical_row < len(self._line_texts):
+                self._line_texts[physical_row] = self._build_row(physical_row)
+        self._refresh_physical_rows(physical_rows)
         self._refresh_documentation()
 
     def scroll_to_row(self, row: int) -> None:
@@ -998,6 +1063,7 @@ __all__ = [
     "HistorySurface",
     "ListenerScreen",
     "PbuiApp",
+    "build_history_row_text",
     "build_history_text",
     "display_width",
     "filter_one_row",

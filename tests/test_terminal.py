@@ -256,6 +256,133 @@ def test_display_intervals_become_character_spans_without_styling_literals(tmp_p
     assert not rich_text.get_style_at_offset(console, 6).reverse
 
 
+@pytest.mark.asyncio
+async def test_large_wrapped_process_history_rebuilds_only_hover_rows(
+    tmp_path, monkeypatch
+):
+    process_count = 240
+    records = {
+        int(f"{index + 1:03d}" + "7" * 72): InspectedProcess(
+            int(f"{index + 1:03d}" + "7" * 72),
+            1000,
+            "sleeping",
+            f"worker-{index:03d} [literal] " + f"argument-{index:03d} " * 12,
+        )
+        for index in range(process_count)
+    }
+    listener = HeadlessListener(
+        str(tmp_path),
+        RootedFilesystem(tmp_path),
+        FixedProcesses(own_pid=-1, records=records),
+    )
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(36, 9)) as pilot:
+        listener.submit("ps")
+        surface = app.screen.history_surface
+        surface.synchronize(force=True)
+        await pilot.pause()
+
+        processes = [
+            presentation
+            for presentation in surface.current_layout.presentations
+            if presentation.presentation_type is listener.types.process
+        ]
+        first, second = processes[40], processes[180]
+        first_rows = {interval.physical_row for interval in first.intervals}
+        second_rows = {interval.physical_row for interval in second.intervals}
+        assert len(first_rows) > 1
+        assert len(second_rows) > 1
+        assert len(surface.current_layout.rows) > 10 * len(
+            first_rows | second_rows
+        )
+
+        logical_text = {
+            logical_row: "".join(
+                row.text
+                for row in surface.current_layout.rows
+                if row.logical_row == logical_row
+            )
+            for logical_row in range(process_count)
+        }
+        for logical_row, record in enumerate(
+            sorted(records.values(), key=lambda item: item.pid)
+        ):
+            assert logical_text[logical_row] == (
+                f"{record.pid}  {record.state}  {record.command}"
+            )
+
+        original_builder = terminal_module.build_history_row_text
+        built_rows = []
+
+        def record_row_build(*args, **kwargs):
+            built_rows.append(args[2])
+            return original_builder(*args, **kwargs)
+
+        def reject_history_build(*_args, **_kwargs):
+            pytest.fail("hover rebuilt the history-wide compatibility text")
+
+        monkeypatch.setattr(
+            terminal_module, "build_history_row_text", record_row_build
+        )
+        monkeypatch.setattr(
+            terminal_module, "build_history_text", reject_history_build
+        )
+        console = Console()
+
+        before_first = tuple(surface._line_texts)
+        surface.set_hovered_presentation(first)
+        assert built_rows == sorted(first_rows)
+        for physical_row, previous_line in enumerate(before_first):
+            if physical_row in first_rows:
+                assert surface._line_texts[physical_row] is not previous_line
+            else:
+                assert surface._line_texts[physical_row] is previous_line
+        for interval in first.intervals:
+            row = surface.current_layout.rows[interval.physical_row]
+            line = surface._line_texts[interval.physical_row]
+            for start, end in terminal_module._interval_character_ranges(
+                row.text, interval
+            ):
+                assert all(
+                    line.get_style_at_offset(console, index).reverse
+                    for index in range(start, end)
+                )
+
+        built_rows.clear()
+        unchanged = tuple(surface._line_texts)
+        surface.set_hovered_presentation(first)
+        assert built_rows == []
+        assert all(
+            current is previous
+            for current, previous in zip(
+                surface._line_texts, unchanged, strict=True
+            )
+        )
+
+        built_rows.clear()
+        before_second = tuple(surface._line_texts)
+        affected = first_rows | second_rows
+        surface.set_hovered_presentation(second)
+        assert built_rows == sorted(affected)
+        for physical_row, previous_line in enumerate(before_second):
+            if physical_row in affected:
+                assert surface._line_texts[physical_row] is not previous_line
+            else:
+                assert surface._line_texts[physical_row] is previous_line
+        for presentation, reverse in ((first, False), (second, True)):
+            for interval in presentation.intervals:
+                row = surface.current_layout.rows[interval.physical_row]
+                line = surface._line_texts[interval.physical_row]
+                for start, end in terminal_module._interval_character_ranges(
+                    row.text, interval
+                ):
+                    assert all(
+                        line.get_style_at_offset(console, index).reverse is reverse
+                        for index in range(start, end)
+                    )
+
+
 @pytest.mark.parametrize(
     ("command", "acceptable"),
     [
