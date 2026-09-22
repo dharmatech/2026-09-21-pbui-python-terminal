@@ -91,6 +91,8 @@ def test_composition_is_coherent_bounded_and_never_changes_process_cwd(tmp_path)
         "Process",
         "Text",
         "Error",
+        "DirectoryListing",
+        "ProcessListing",
     ]
     assert listener.command_names == ("ls", "ps", "show", "kill", "cd", "rm")
     assert listener.filesystem.allowed_root == str(tmp_path)
@@ -100,6 +102,12 @@ def test_composition_is_coherent_bounded_and_never_changes_process_cwd(tmp_path)
     assert listener.translators.lookup(listener.types.process) is not None
     assert listener.translators.lookup(listener.types.text) is None
     assert listener.translators.lookup(listener.types.error) is None
+    assert listener.translators.lookup(listener.types.directory_listing) is None
+    assert listener.translators.lookup(listener.types.process_listing) is None
+    for command in ("cd", "rm", "kill", "show"):
+        accepted = listener._acceptable_types(command)
+        assert listener.types.directory_listing not in accepted
+        assert listener.types.process_listing not in accepted
 
     listener.submit("cd child")
     assert listener.cwd == str(child)

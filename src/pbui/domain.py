@@ -1,8 +1,8 @@
 """Domain values, parsers, drawers, and product wording for ``pbui``.
 
-The objects in this module deliberately contain no cached host state.  Path
-classification is performed through a small read-only seam, while drawing and
-formatting remain pure.
+Path classification is performed through a small read-only seam.  Retained
+listing values cache only already-captured scalar data; their view operations,
+drawing, and formatting remain pure.
 """
 
 from __future__ import annotations
@@ -21,13 +21,15 @@ from pbui.text import DrawingContext, HistoryRow
 
 @dataclass(frozen=True, slots=True)
 class DomainTypes:
-    """The five exact presentation-type entries owned by an application."""
+    """The seven exact presentation-type entries owned by an application."""
 
     file: PresentationType
     directory: PresentationType
     process: PresentationType
     text: PresentationType
     error: PresentationType
+    directory_listing: PresentationType
+    process_listing: PresentationType
 
 
 def register_domain_types(registry: PresentationTypeRegistry) -> DomainTypes:
@@ -41,6 +43,8 @@ def register_domain_types(registry: PresentationTypeRegistry) -> DomainTypes:
         process=registry.register("Process"),
         text=registry.register("Text"),
         error=registry.register("Error"),
+        directory_listing=registry.register("DirectoryListing"),
+        process_listing=registry.register("ProcessListing"),
     )
 
 
@@ -80,12 +84,296 @@ DomainReference = FileRef | DirectoryRef | ProcessRef
 PathReference = FileRef | DirectoryRef
 
 
+class ListingViewError(ValueError):
+    """A listing view is not valid for its listing kind."""
+
+
+@dataclass(frozen=True, slots=True)
+class DirectoryListingMember:
+    """One directory member captured for later pure redisplay."""
+
+    reference: PathReference
+    displayed_basename: str
+    size: int | None
+    mtime: int
+
+    def __post_init__(self) -> None:
+        if type(self.reference) not in {FileRef, DirectoryRef}:
+            raise TypeError("reference must be exactly FileRef or DirectoryRef")
+        if type(self.displayed_basename) is not str:
+            raise TypeError("displayed basename must be a string")
+        if type(self.reference) is FileRef:
+            if type(self.size) is not int:
+                raise TypeError("file size must be an exact integer")
+            if self.size < 0:
+                raise ValueError("file size must be nonnegative")
+        elif self.size is not None:
+            raise TypeError("directory size must be None")
+        if type(self.mtime) is not int:
+            raise TypeError("mtime must be an exact integer")
+
+
+PROCESS_LISTING_STATES = frozenset(
+    {
+        "running",
+        "sleeping",
+        "disk-sleep",
+        "stopped",
+        "tracing",
+        "zombie",
+        "dead",
+        "idle",
+        "unknown",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessListingMember:
+    """One process member captured for later pure redisplay."""
+
+    reference: ProcessRef
+    state: str
+    uid: int
+    displayed_user: str
+    command: str
+
+    def __post_init__(self) -> None:
+        if type(self.reference) is not ProcessRef:
+            raise TypeError("reference must be exactly ProcessRef")
+        if type(self.state) is not str:
+            raise TypeError("state must be a string")
+        if self.state not in PROCESS_LISTING_STATES:
+            raise ValueError("state is not a canonical process state")
+        if type(self.uid) is not int:
+            raise TypeError("uid must be an exact integer")
+        if self.uid < 0:
+            raise ValueError("uid must be nonnegative")
+        if type(self.displayed_user) is not str:
+            raise TypeError("displayed user must be a string")
+        if type(self.command) is not str:
+            raise TypeError("command must be a string")
+
+
+@dataclass(frozen=True, slots=True)
+class ListingView:
+    """The three independent choices that determine a listing's visible view."""
+
+    sort_key: str
+    substring_filter: str | None = None
+    kind_filter: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.sort_key) is not str:
+            raise TypeError("sort key must be a string")
+        if self.substring_filter is not None:
+            if type(self.substring_filter) is not str:
+                raise TypeError("substring filter must be a string or None")
+            if not self.substring_filter:
+                raise ListingViewError("substring filter must not be empty")
+        if self.kind_filter is not None and type(self.kind_filter) is not str:
+            raise TypeError("kind filter must be a string or None")
+
+
+DIRECTORY_LISTING_SORT_KEYS = frozenset({"name", "size", "mtime"})
+DIRECTORY_LISTING_KINDS = frozenset({"files", "directories"})
+PROCESS_LISTING_SORT_KEYS = frozenset({"pid", "state", "command"})
+
+
+def _validate_view(
+    view: object,
+    *,
+    sort_keys: frozenset[str],
+    kind_filters: frozenset[str],
+) -> ListingView:
+    if type(view) is not ListingView:
+        raise TypeError("view must be exactly ListingView")
+    if view.sort_key not in sort_keys:
+        raise ListingViewError(f"invalid listing sort key: {view.sort_key}")
+    if view.kind_filter is not None and view.kind_filter not in kind_filters:
+        raise ListingViewError(f"invalid listing kind filter: {view.kind_filter}")
+    return view
+
+
+class DirectoryListing:
+    """One stable captured directory listing with replaceable pure view state."""
+
+    __slots__ = ("_directory", "_members", "_view")
+
+    def __init__(
+        self,
+        directory: DirectoryRef,
+        members: Iterable[DirectoryListingMember],
+        view: ListingView | None = None,
+    ) -> None:
+        if type(directory) is not DirectoryRef:
+            raise TypeError("directory must be exactly DirectoryRef")
+        captured = tuple(members)
+        if any(type(member) is not DirectoryListingMember for member in captured):
+            raise TypeError("directory listing members must have the exact member type")
+        initial_view = ListingView("name") if view is None else view
+        self._directory = directory
+        self._members = captured
+        self._view = self._validated_view(initial_view)
+
+    @staticmethod
+    def _validated_view(view: object) -> ListingView:
+        return _validate_view(
+            view,
+            sort_keys=DIRECTORY_LISTING_SORT_KEYS,
+            kind_filters=DIRECTORY_LISTING_KINDS,
+        )
+
+    @property
+    def directory(self) -> DirectoryRef:
+        return self._directory
+
+    @property
+    def members(self) -> tuple[DirectoryListingMember, ...]:
+        return self._members
+
+    @property
+    def view(self) -> ListingView:
+        return self._view
+
+    def replace_sort_key(self, sort_key: str) -> None:
+        candidate = ListingView(
+            sort_key, self._view.substring_filter, self._view.kind_filter
+        )
+        self._view = self._validated_view(candidate)
+
+    def replace_substring_filter(self, substring_filter: str | None) -> None:
+        candidate = ListingView(
+            self._view.sort_key, substring_filter, self._view.kind_filter
+        )
+        self._view = self._validated_view(candidate)
+
+    def replace_kind_filter(self, kind_filter: str | None) -> None:
+        candidate = ListingView(
+            self._view.sort_key, self._view.substring_filter, kind_filter
+        )
+        self._view = self._validated_view(candidate)
+
+    def widen(self) -> None:
+        self._view = ListingView(self._view.sort_key)
+
+    def visible_members(self) -> tuple[DirectoryListingMember, ...]:
+        members: Iterable[DirectoryListingMember] = self._members
+        if self._view.substring_filter is not None:
+            substring = self._view.substring_filter
+            members = (
+                member
+                for member in members
+                if substring in member.displayed_basename
+            )
+        if self._view.kind_filter == "files":
+            members = (
+                member for member in members if type(member.reference) is FileRef
+            )
+        elif self._view.kind_filter == "directories":
+            members = (
+                member
+                for member in members
+                if type(member.reference) is DirectoryRef
+            )
+
+        if self._view.sort_key == "name":
+            key = lambda member: (member.displayed_basename,)
+        elif self._view.sort_key == "size":
+            key = lambda member: (
+                type(member.reference) is DirectoryRef,
+                -member.size if member.size is not None else 0,
+                member.displayed_basename,
+            )
+        else:
+            key = lambda member: (-member.mtime, member.displayed_basename)
+        return tuple(sorted(members, key=key))
+
+
+class ProcessListing:
+    """One stable captured process listing with replaceable pure view state."""
+
+    __slots__ = ("_members", "_view")
+
+    def __init__(
+        self,
+        members: Iterable[ProcessListingMember],
+        view: ListingView | None = None,
+    ) -> None:
+        captured = tuple(members)
+        if any(type(member) is not ProcessListingMember for member in captured):
+            raise TypeError("process listing members must have the exact member type")
+        initial_view = ListingView("pid") if view is None else view
+        self._members = captured
+        self._view = self._validated_view(initial_view)
+
+    @staticmethod
+    def _validated_view(view: object) -> ListingView:
+        return _validate_view(
+            view,
+            sort_keys=PROCESS_LISTING_SORT_KEYS,
+            kind_filters=PROCESS_LISTING_STATES,
+        )
+
+    @property
+    def members(self) -> tuple[ProcessListingMember, ...]:
+        return self._members
+
+    @property
+    def view(self) -> ListingView:
+        return self._view
+
+    def replace_sort_key(self, sort_key: str) -> None:
+        candidate = ListingView(
+            sort_key, self._view.substring_filter, self._view.kind_filter
+        )
+        self._view = self._validated_view(candidate)
+
+    def replace_substring_filter(self, substring_filter: str | None) -> None:
+        candidate = ListingView(
+            self._view.sort_key, substring_filter, self._view.kind_filter
+        )
+        self._view = self._validated_view(candidate)
+
+    def replace_kind_filter(self, kind_filter: str | None) -> None:
+        candidate = ListingView(
+            self._view.sort_key, self._view.substring_filter, kind_filter
+        )
+        self._view = self._validated_view(candidate)
+
+    def widen(self) -> None:
+        self._view = ListingView(self._view.sort_key)
+
+    def visible_members(self) -> tuple[ProcessListingMember, ...]:
+        members: Iterable[ProcessListingMember] = self._members
+        if self._view.substring_filter is not None:
+            substring = self._view.substring_filter
+            members = (
+                member for member in members if substring in member.command
+            )
+        if self._view.kind_filter is not None:
+            state = self._view.kind_filter
+            members = (member for member in members if member.state == state)
+
+        if self._view.sort_key == "pid":
+            key = lambda member: (member.reference.pid,)
+        elif self._view.sort_key == "state":
+            key = lambda member: (member.state, member.reference.pid)
+        else:
+            key = lambda member: (member.command, member.reference.pid)
+        return tuple(sorted(members, key=key))
+
+
+ListingValue = DirectoryListing | ProcessListing
+DomainValue = DomainReference | ListingValue | str
+
+
 @dataclass(frozen=True, slots=True)
 class TypedDomainValue:
     """A stored value paired with its explicit registry entry."""
 
     presentation_type: PresentationType
-    value: DomainReference | str
+    value: DomainValue
 
     @property
     def type(self) -> PresentationType:
@@ -517,13 +805,25 @@ def compose_failure_message(
 
 
 __all__ = [
+    "DIRECTORY_LISTING_KINDS",
+    "DIRECTORY_LISTING_SORT_KEYS",
+    "DirectoryListing",
+    "DirectoryListingMember",
     "DirectoryRef",
+    "DomainValue",
     "DomainDrawingContexts",
     "DomainParseError",
     "DomainTypes",
     "FileRef",
+    "ListingValue",
+    "ListingView",
+    "ListingViewError",
     "OSReadOnlyPathAccess",
     "PathReference",
+    "PROCESS_LISTING_SORT_KEYS",
+    "PROCESS_LISTING_STATES",
+    "ProcessListing",
+    "ProcessListingMember",
     "ProcessRef",
     "ReadOnlyPathAccess",
     "TypedDomainValue",

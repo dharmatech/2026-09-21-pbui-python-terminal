@@ -6,10 +6,17 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from pbui.domain import (
+    PROCESS_LISTING_STATES,
+    DirectoryListing,
+    DirectoryListingMember,
     DirectoryRef,
     DomainParseError,
     FileRef,
+    ListingView,
+    ListingViewError,
     OSReadOnlyPathAccess,
+    ProcessListing,
+    ProcessListingMember,
     ProcessRef,
     TypedDomainValue,
     classify_path,
@@ -54,7 +61,7 @@ def render(row, width=500):
     return layout(history, width)
 
 
-def test_registers_exact_five_domain_types_in_order_and_by_identity():
+def test_registers_exact_seven_domain_types_in_order_and_by_identity():
     registry = PresentationTypeRegistry()
     types = register_domain_types(registry)
 
@@ -64,10 +71,17 @@ def test_registers_exact_five_domain_types_in_order_and_by_identity():
         "Process",
         "Text",
         "Error",
+        "DirectoryListing",
+        "ProcessListing",
     ]
-    assert len({id(entry) for entry in registry}) == 5
+    assert len({id(entry) for entry in registry}) == 7
     assert types.file is registry.lookup("File")
     assert types.directory is registry.lookup("Directory")
+    assert types.process is registry.lookup("Process")
+    assert types.text is registry.lookup("Text")
+    assert types.error is registry.lookup("Error")
+    assert types.directory_listing is registry.lookup("DirectoryListing")
+    assert types.process_listing is registry.lookup("ProcessListing")
     assert types.file is not types.directory
     with pytest.raises(ValueError, match="already registered"):
         register_domain_types(registry)
@@ -431,3 +445,334 @@ def test_domain_drawing_contexts_are_independent_application_supplied_tables(
     assert isinstance(contexts.standalone, DrawingContext)
     assert isinstance(contexts.listing, DrawingContext)
     assert contexts.standalone is not contexts.listing
+
+
+def directory_listing_members():
+    return (
+        DirectoryListingMember(FileRef("/path-only-token/one"), "zeta", 5, 100),
+        DirectoryListingMember(FileRef("/items/two"), "Beta", 10, 50),
+        DirectoryListingMember(FileRef("/items/three"), "alpha", 10, 100),
+        DirectoryListingMember(DirectoryRef("/items/four"), "adir", None, 200),
+        DirectoryListingMember(DirectoryRef("/items/five"), "Zdir", None, 100),
+    )
+
+
+def process_listing_members():
+    states = (
+        "running",
+        "sleeping",
+        "disk-sleep",
+        "stopped",
+        "tracing",
+        "zombie",
+        "dead",
+        "idle",
+        "unknown",
+    )
+    members = [
+        ProcessListingMember(ProcessRef(20), "running", 123, "needle-user", "same"),
+        ProcessListingMember(
+            ProcessRef(3),
+            "sleeping",
+            99,
+            "alice",
+            "x" * 60 + "TAIL",
+        ),
+        ProcessListingMember(ProcessRef(10), "running", 10, "777", "same"),
+    ]
+    members.extend(
+        ProcessListingMember(
+            ProcessRef(100 + index), state, index, f"user-{index}", f"cmd-{state}"
+        )
+        for index, state in enumerate(states[2:], start=2)
+    )
+    return tuple(members)
+
+
+def test_listing_member_records_are_frozen_slotted_and_validate_exact_shapes():
+    file_member = DirectoryListingMember(FileRef("/file"), "file", 0, -1)
+    directory_member = DirectoryListingMember(
+        DirectoryRef("/directory"), "directory", None, 0
+    )
+    process_member = ProcessListingMember(
+        ProcessRef(1), "running", 0, "user", "command"
+    )
+
+    for member, attribute in (
+        (file_member, "size"),
+        (directory_member, "mtime"),
+        (process_member, "uid"),
+    ):
+        with pytest.raises(FrozenInstanceError):
+            setattr(member, attribute, 1)
+        with pytest.raises((AttributeError, TypeError)):
+            member.extra = "not slotted"
+
+    for arguments in (
+        (ProcessRef(1), "name", 1, 0),
+        (FileRef("/file"), 7, 1, 0),
+        (FileRef("/file"), "name", None, 0),
+        (FileRef("/file"), "name", True, 0),
+        (FileRef("/file"), "name", -1, 0),
+        (DirectoryRef("/directory"), "name", 0, 0),
+        (FileRef("/file"), "name", 1, True),
+        (FileRef("/file"), "name", 1, 1.0),
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            DirectoryListingMember(*arguments)
+
+    for arguments in (
+        (FileRef("/file"), "running", 0, "user", "command"),
+        (ProcessRef(1), "other", 0, "user", "command"),
+        (ProcessRef(1), 3, 0, "user", "command"),
+        (ProcessRef(1), "running", True, "user", "command"),
+        (ProcessRef(1), "running", -1, "user", "command"),
+        (ProcessRef(1), "running", 0, 3, "command"),
+        (ProcessRef(1), "running", 0, "user", 3),
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            ProcessListingMember(*arguments)
+
+
+def test_listing_construction_captures_iterables_once_and_uses_identity_equality():
+    class OnePass:
+        def __init__(self, values):
+            self.values = values
+            self.iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            assert self.iterations == 1
+            return iter(self.values)
+
+    directory_values = directory_listing_members()
+    process_values = process_listing_members()
+    directory_input = OnePass(directory_values)
+    process_input = OnePass(process_values)
+    directory = DirectoryListing(DirectoryRef("/items"), directory_input)
+    process = ProcessListing(process_input)
+
+    assert directory_input.iterations == process_input.iterations == 1
+    assert directory.members == directory_values
+    assert process.members == process_values
+    assert isinstance(directory.members, tuple)
+    assert isinstance(process.members, tuple)
+    assert directory.view == ListingView("name")
+    assert process.view == ListingView("pid")
+    assert directory != DirectoryListing(DirectoryRef("/items"), directory_values)
+    assert process != ProcessListing(process_values)
+    with pytest.raises(TypeError):
+        DirectoryListing(FileRef("/items"), directory_values)
+    with pytest.raises(TypeError):
+        DirectoryListing(DirectoryRef("/items"), process_values)
+    with pytest.raises(TypeError):
+        ProcessListing(directory_values)
+
+
+def test_directory_listing_sorts_only_cached_fields_with_deterministic_ties():
+    listing = DirectoryListing(DirectoryRef("/items"), directory_listing_members())
+
+    assert [member.displayed_basename for member in listing.visible_members()] == [
+        "Beta",
+        "Zdir",
+        "adir",
+        "alpha",
+        "zeta",
+    ]
+    listing.replace_sort_key("size")
+    assert [member.displayed_basename for member in listing.visible_members()] == [
+        "Beta",
+        "alpha",
+        "zeta",
+        "Zdir",
+        "adir",
+    ]
+    listing.replace_sort_key("mtime")
+    assert [member.displayed_basename for member in listing.visible_members()] == [
+        "adir",
+        "Zdir",
+        "alpha",
+        "zeta",
+        "Beta",
+    ]
+
+
+def test_directory_listing_filters_replace_combine_widen_and_ignore_paths():
+    listing = DirectoryListing(DirectoryRef("/items"), directory_listing_members())
+
+    listing.replace_kind_filter("files")
+    assert {member.displayed_basename for member in listing.visible_members()} == {
+        "Beta",
+        "alpha",
+        "zeta",
+    }
+    listing.replace_kind_filter("directories")
+    assert {member.displayed_basename for member in listing.visible_members()} == {
+        "Zdir",
+        "adir",
+    }
+    listing.replace_substring_filter("dir")
+    assert [member.displayed_basename for member in listing.visible_members()] == [
+        "Zdir",
+        "adir",
+    ]
+    listing.replace_substring_filter("a")
+    assert listing.view == ListingView("name", "a", "directories")
+    assert [member.displayed_basename for member in listing.visible_members()] == [
+        "adir"
+    ]
+    listing.replace_sort_key("size")
+    assert listing.view == ListingView("size", "a", "directories")
+    listing.replace_kind_filter(None)
+    listing.replace_substring_filter("path-only-token")
+    assert listing.visible_members() == ()
+    listing.widen()
+    assert listing.view == ListingView("size")
+    assert len(listing.visible_members()) == 5
+
+
+def test_directory_invalid_view_changes_are_atomic_and_preserve_all_identities():
+    listing = DirectoryListing(DirectoryRef("/items"), directory_listing_members())
+    listing.replace_sort_key("mtime")
+    listing.replace_substring_filter("a")
+    listing.replace_kind_filter("files")
+    original_view = listing.view
+    original_members = listing.members
+    original_member_ids = tuple(map(id, listing.members))
+
+    for operation, argument in (
+        (listing.replace_sort_key, "pid"),
+        (listing.replace_substring_filter, ""),
+        (listing.replace_kind_filter, "running"),
+    ):
+        with pytest.raises(ListingViewError):
+            operation(argument)
+        assert listing.view is original_view
+        assert listing.members is original_members
+        assert tuple(map(id, listing.members)) == original_member_ids
+
+
+def test_process_listing_sorts_by_pid_state_and_full_command_with_pid_ties():
+    listing = ProcessListing(process_listing_members())
+
+    assert [member.reference.pid for member in listing.visible_members()] == [
+        3,
+        10,
+        20,
+        102,
+        103,
+        104,
+        105,
+        106,
+        107,
+        108,
+    ]
+    listing.replace_sort_key("state")
+    assert [
+        (member.state, member.reference.pid) for member in listing.visible_members()
+    ] == sorted(
+        (member.state, member.reference.pid) for member in listing.members
+    )
+    listing.replace_sort_key("command")
+    assert [
+        (member.command, member.reference.pid) for member in listing.visible_members()
+    ] == sorted(
+        (member.command, member.reference.pid) for member in listing.members
+    )
+    assert [
+        member.reference.pid
+        for member in listing.visible_members()
+        if member.command == "same"
+    ] == [10, 20]
+
+
+@pytest.mark.parametrize("state", sorted(PROCESS_LISTING_STATES))
+def test_process_listing_accepts_each_exact_state_filter(state):
+    listing = ProcessListing(process_listing_members())
+
+    listing.replace_kind_filter(state)
+
+    assert listing.visible_members()
+    assert {member.state for member in listing.visible_members()} == {state}
+
+
+def test_process_listing_filters_only_full_command_and_combines_replacements():
+    listing = ProcessListing(process_listing_members())
+
+    listing.replace_substring_filter("TAIL")
+    assert [member.reference.pid for member in listing.visible_members()] == [3]
+    listing.replace_substring_filter("needle")
+    assert listing.visible_members() == ()
+    listing.replace_substring_filter("777")
+    assert listing.visible_members() == ()
+    listing.replace_substring_filter("20")
+    assert listing.visible_members() == ()
+    listing.replace_substring_filter("running")
+    assert listing.visible_members() == ()
+    listing.replace_substring_filter("same")
+    listing.replace_kind_filter("running")
+    listing.replace_sort_key("command")
+    assert [member.reference.pid for member in listing.visible_members()] == [10, 20]
+    assert listing.view == ListingView("command", "same", "running")
+    listing.replace_kind_filter("sleeping")
+    assert listing.visible_members() == ()
+    listing.widen()
+    assert listing.view == ListingView("command")
+    assert len(listing.visible_members()) == len(listing.members)
+
+
+def test_process_invalid_view_changes_are_atomic_and_preserve_all_identities():
+    listing = ProcessListing(process_listing_members())
+    listing.replace_sort_key("state")
+    listing.replace_substring_filter("cmd")
+    listing.replace_kind_filter("idle")
+    original_view = listing.view
+    original_members = listing.members
+    original_member_ids = tuple(map(id, listing.members))
+
+    for operation, argument in (
+        (listing.replace_sort_key, "mtime"),
+        (listing.replace_substring_filter, ""),
+        (listing.replace_kind_filter, "files"),
+    ):
+        with pytest.raises(ListingViewError):
+            operation(argument)
+        assert listing.view is original_view
+        assert listing.members is original_members
+        assert tuple(map(id, listing.members)) == original_member_ids
+
+
+def test_listing_view_operations_never_revisit_host_or_escape_functions(monkeypatch):
+    import pbui.domain as domain_module
+
+    directory = DirectoryListing(DirectoryRef("/items"), directory_listing_members())
+    process = ProcessListing(process_listing_members())
+
+    def fail(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("pure listing view called a host or escape operation")
+
+    monkeypatch.setattr(domain_module.os, "stat", fail)
+    monkeypatch.setattr(domain_module.os, "lstat", fail)
+    monkeypatch.setattr(domain_module.os, "scandir", fail)
+    monkeypatch.setattr(domain_module.os.path, "basename", fail)
+    monkeypatch.setattr(domain_module, "escape_display", fail)
+
+    for sort_key in ("name", "size", "mtime"):
+        directory.replace_sort_key(sort_key)
+        directory.replace_substring_filter("a")
+        directory.replace_kind_filter("files")
+        directory.visible_members()
+        directory.replace_kind_filter("directories")
+        directory.visible_members()
+        directory.widen()
+        directory.visible_members()
+    for sort_key in ("pid", "state", "command"):
+        process.replace_sort_key(sort_key)
+        process.replace_substring_filter("cmd")
+        process.replace_kind_filter("running")
+        process.visible_members()
+        process.replace_kind_filter("sleeping")
+        process.visible_members()
+        process.widen()
+        process.visible_members()
