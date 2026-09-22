@@ -17,6 +17,58 @@ from pbui.substrate import (
 )
 
 
+ELLIPSIS = "…"
+
+
+def _character_width(character: str) -> int:
+    """Return a harmless display width for already-sanitized product text."""
+
+    return max(0, wcwidth(character))
+
+
+def display_width(text: str) -> int:
+    """Measure a string in terminal display columns."""
+
+    return sum(_character_width(character) for character in text)
+
+
+def _display_clusters(text: str) -> tuple[tuple[str, int], ...]:
+    """Group zero-width marks with the preceding drawn character."""
+
+    clusters: list[tuple[str, int]] = []
+    for character in text:
+        width = _character_width(character)
+        if width == 0 and clusters:
+            cluster, cluster_width = clusters[-1]
+            clusters[-1] = (cluster + character, cluster_width)
+        else:
+            clusters.append((character, width))
+    return tuple(clusters)
+
+
+def truncate_display(text: str, width: int) -> str:
+    """Truncate to display columns, preserving wide/combining characters."""
+
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
+    if width <= 0:
+        return ""
+    if display_width(text) <= width:
+        return text
+    if width == 1:
+        return ELLIPSIS
+
+    budget = width - 1
+    used = 0
+    retained: list[str] = []
+    for cluster, cluster_width in _display_clusters(text):
+        if used + cluster_width > budget:
+            break
+        retained.append(cluster)
+        used += cluster_width
+    return "".join(retained) + ELLIPSIS
+
+
 @dataclass(frozen=True, slots=True)
 class LiteralFragment:
     text: str

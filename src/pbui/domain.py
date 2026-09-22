@@ -16,7 +16,14 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from pbui.substrate import Presentation, PresentationType, PresentationTypeRegistry
-from pbui.text import DrawingContext, HistoryRow
+from pbui.text import (
+    DrawingContext,
+    HistoryRow,
+    LiteralFragment,
+    PresentedFragment,
+    display_width,
+    truncate_display,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -921,6 +928,198 @@ def format_empty_directory(reference: DirectoryRef) -> str:
     return f"Directory is empty: {escape_display(reference.path)}"
 
 
+def _left_cell(text: str, width: int) -> str:
+    return text + " " * (width - display_width(text))
+
+
+def _right_cell(text: str, width: int) -> str:
+    return " " * (width - display_width(text)) + text
+
+
+def _fixed_cell(text: str, width: int, *, label: str) -> str:
+    """Fit cached text exactly, placing a truncation ellipsis in the last cell."""
+
+    measured = display_width(text)
+    if measured <= width:
+        return _left_cell(text, width)
+    shortened = truncate_display(text, width)
+    padding = width - display_width(shortened)
+    if padding:
+        shortened = shortened[:-1] + " " * padding + shortened[-1]
+    if display_width(shortened) != width:
+        raise AssertionError(f"{label} cell did not fit its fixed width")
+    return shortened
+
+
+def _untruncated_cell(
+    text: str, width: int, *, label: str, right_aligned: bool = False
+) -> str:
+    measured = display_width(text)
+    if measured > width:
+        raise ValueError(f"{label} value exceeds {width} display cells")
+    return _right_cell(text, width) if right_aligned else _left_cell(text, width)
+
+
+def _presented_listing_row(
+    text: str, presentation: Presentation, listing: ListingValue
+) -> HistoryRow:
+    fragment = PresentedFragment(
+        presentation.id,
+        (LiteralFragment(text),),
+    )
+    return HistoryRow((fragment,), (presentation,), listing)
+
+
+def _visible_presentations(
+    listing: ListingValue,
+    visible_members: tuple[DirectoryListingMember | ProcessListingMember, ...],
+) -> tuple[Presentation, ...]:
+    """Match visible cached members to bindings by object identity and occurrence."""
+
+    header = listing.header_presentation
+    if header is None:
+        raise ValueError("listing presentations are not bound")
+    member_presentations = listing.member_presentations
+    if len(member_presentations) != len(listing.members):
+        raise ValueError("listing member presentations are not fully bound")
+
+    by_identity: dict[int, list[Presentation]] = {}
+    for member, presentation in zip(
+        listing.members, member_presentations, strict=True
+    ):
+        by_identity.setdefault(id(member), []).append(presentation)
+
+    used: dict[int, int] = {}
+    result: list[Presentation] = []
+    for member in visible_members:
+        identity = id(member)
+        offset = used.get(identity, 0)
+        try:
+            result.append(by_identity[identity][offset])
+        except (KeyError, IndexError):
+            raise ValueError(
+                "visible listing member has no identity-matched presentation"
+            ) from None
+        used[identity] = offset + 1
+    return tuple(result)
+
+
+def directory_listing_rows(listing: DirectoryListing) -> tuple[HistoryRow, ...]:
+    """Build the complete pure table block for one bound directory listing."""
+
+    if type(listing) is not DirectoryListing:
+        raise TypeError("directory table requires exactly DirectoryListing")
+    if listing.header_presentation is None:
+        raise ValueError("listing presentations are not bound")
+
+    visible = listing.visible_members()
+    presentations = _visible_presentations(listing, visible)
+    name_width = max(
+        (display_width(member.displayed_basename) for member in visible),
+        default=4,
+    )
+    name_width = max(4, name_width)
+    size_width = max(
+        (
+            display_width(str(member.size))
+            for member in visible
+            if member.size is not None
+        ),
+        default=12,
+    )
+    size_width = max(12, size_width)
+
+    header_text = "  ".join(
+        (
+            _left_cell("name", name_width),
+            _right_cell("size", size_width),
+            _left_cell("modified", 20),
+        )
+    )
+    rows = [
+        _presented_listing_row(
+            header_text,
+            listing.header_presentation,
+            listing,
+        )
+    ]
+    for member, presentation in zip(visible, presentations, strict=True):
+        size = " " * size_width if member.size is None else _right_cell(
+            str(member.size), size_width
+        )
+        text = "  ".join(
+            (
+                _left_cell(member.displayed_basename, name_width),
+                size,
+                _left_cell(format_utc_timestamp(member.mtime), 20),
+            )
+        )
+        rows.append(_presented_listing_row(text, presentation, listing))
+
+    if not visible:
+        if not listing.members:
+            explanation = format_empty_directory(listing.directory)
+        else:
+            explanation = "Nothing matches the active filters."
+        rows.append(HistoryRow((LiteralFragment(explanation),), (), listing))
+    return tuple(rows)
+
+
+def process_listing_rows(listing: ProcessListing) -> tuple[HistoryRow, ...]:
+    """Build the complete pure table block for one bound process listing."""
+
+    if type(listing) is not ProcessListing:
+        raise TypeError("process table requires exactly ProcessListing")
+    if listing.header_presentation is None:
+        raise ValueError("listing presentations are not bound")
+
+    visible = listing.visible_members()
+    presentations = _visible_presentations(listing, visible)
+    header_text = "  ".join(
+        (
+            _untruncated_cell("pid", 10, label="pid", right_aligned=True),
+            _untruncated_cell("state", 10, label="state"),
+            _fixed_cell("user", 16, label="user"),
+            _fixed_cell("command", 48, label="command"),
+        )
+    )
+    rows = [
+        _presented_listing_row(
+            header_text,
+            listing.header_presentation,
+            listing,
+        )
+    ]
+    for member, presentation in zip(visible, presentations, strict=True):
+        text = "  ".join(
+            (
+                _untruncated_cell(
+                    str(member.reference.pid),
+                    10,
+                    label="pid",
+                    right_aligned=True,
+                ),
+                _untruncated_cell(member.state, 10, label="state"),
+                _fixed_cell(member.displayed_user, 16, label="user"),
+                _fixed_cell(member.command, 48, label="command"),
+            )
+        )
+        rows.append(_presented_listing_row(text, presentation, listing))
+
+    if not visible:
+        active_filter = (
+            listing.view.substring_filter is not None
+            or listing.view.kind_filter is not None
+        )
+        explanation = (
+            "No processes are available."
+            if not listing.members and not active_filter
+            else "Nothing matches the active filters."
+        )
+        rows.append(HistoryRow((LiteralFragment(explanation),), (), listing))
+    return tuple(rows)
+
+
 def compose_failure_message(
     action_phrase: str,
     raw_subject: str | int,
@@ -963,6 +1162,7 @@ __all__ = [
     "TypedDomainValue",
     "classify_path",
     "compose_failure_message",
+    "directory_listing_rows",
     "escape_display",
     "format_directory_detail",
     "format_empty_directory",
@@ -981,6 +1181,7 @@ __all__ = [
     "path_listing_row",
     "path_sort_key",
     "process_listing_row",
+    "process_listing_rows",
     "register_domain_drawers",
     "register_domain_types",
     "sort_path_references",

@@ -21,6 +21,7 @@ from pbui.domain import (
     TypedDomainValue,
     classify_path,
     compose_failure_message,
+    directory_listing_rows,
     escape_display,
     format_directory_detail,
     format_empty_directory,
@@ -38,11 +39,12 @@ from pbui.domain import (
     parse_show,
     path_listing_row,
     process_listing_row,
+    process_listing_rows,
     register_domain_types,
     sort_path_references,
 )
 from pbui.substrate import PresentationHistory, PresentationTypeRegistry
-from pbui.text import DrawingContext, layout
+from pbui.text import DrawingContext, display_width, layout, truncate_display
 
 
 @pytest.fixture
@@ -781,6 +783,212 @@ def test_listing_view_operations_never_revisit_host_or_escape_functions(monkeypa
 def presentation_for(context, value, presentation_type):
     fragment = context.present(value, presentation_type)
     return context.presentation(fragment.presentation_id)
+
+
+def bind_listing_presentations(listing, domain_types):
+    context = make_domain_drawing_contexts(domain_types).listing
+    if type(listing) is DirectoryListing:
+        listing_type = domain_types.directory_listing
+        member_types = (
+            domain_types.directory
+            if type(member.reference) is DirectoryRef
+            else domain_types.file
+            for member in listing.members
+        )
+    else:
+        listing_type = domain_types.process_listing
+        member_types = (domain_types.process for _member in listing.members)
+    header = presentation_for(context, listing, listing_type)
+    members = tuple(
+        presentation_for(context, member.reference, presentation_type)
+        for member, presentation_type in zip(
+            listing.members, member_types, strict=True
+        )
+    )
+    listing.bind_presentations(header, members, domain_types)
+    return header, members
+
+
+def render_table(rows, width=500):
+    history = PresentationHistory()
+    for row in rows:
+        history.append(row)
+    return layout(history, width)
+
+
+def test_directory_table_rows_are_complete_pure_display_cell_presentations(
+    domain_types,
+):
+    long_name = "x" * 30
+    listing = DirectoryListing(
+        DirectoryRef("/items"),
+        (
+            DirectoryListingMember(FileRef("/items/a"), "a", 0, 0),
+            DirectoryListingMember(
+                FileRef(f"/items/{long_name}"), long_name, 1_234_567_890_123, 1
+            ),
+            DirectoryListingMember(
+                DirectoryRef("/items/wide"), "界é", None, 1
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="not bound"):
+        directory_listing_rows(listing)
+    header, member_presentations = bind_listing_presentations(listing, domain_types)
+
+    rows = directory_listing_rows(listing)
+    rendered = render_table(rows)
+    texts = tuple(row.text for row in rendered.rows)
+    assert texts == (
+        f"{'name':<30}  {'size':>13}  {'modified':<20}",
+        f"{'a':<30}  {0:>13}  1970-01-01T00:00:00Z",
+        f"{long_name}  {1_234_567_890_123:>13}  1970-01-01T00:00:01Z",
+        f"界é{' ' * 27}  {'':13}  1970-01-01T00:00:01Z",
+    )
+    visible_presentations = (
+        header,
+        member_presentations[0],
+        member_presentations[1],
+        member_presentations[2],
+    )
+    for row_number, (row, presentation) in enumerate(
+        zip(rows, visible_presentations, strict=True)
+    ):
+        assert row.listing_owner is listing
+        assert row.presentations == (presentation,)
+        assert row.presentation_ids == (presentation.id,)
+        for column in range(display_width(texts[row_number])):
+            assert rendered.hit_test(column, row_number) is presentation
+
+    listing.replace_substring_filter("界")
+    filtered = directory_listing_rows(listing)
+    assert tuple(row.text for row in render_table(filtered).rows) == (
+        f"{'name':<4}  {'size':>12}  {'modified':<20}",
+        f"界é {' ' * 14}  1970-01-01T00:00:01Z",
+    )
+    assert filtered[1].presentations == (member_presentations[2],)
+
+    listing.replace_substring_filter("absent")
+    no_match = directory_listing_rows(listing)
+    assert tuple(row.text for row in render_table(no_match).rows)[-1] == (
+        "Nothing matches the active filters."
+    )
+    assert no_match[-1].presentations == ()
+    assert no_match[-1].listing_owner is listing
+
+
+def test_empty_directory_table_always_keeps_header_and_empty_sentence(domain_types):
+    listing = DirectoryListing(DirectoryRef("/empty"), ())
+    header, _members = bind_listing_presentations(listing, domain_types)
+
+    for mutate in (
+        lambda: None,
+        lambda: listing.replace_sort_key("size"),
+        lambda: listing.replace_substring_filter("missing"),
+        lambda: listing.replace_kind_filter("files"),
+    ):
+        mutate()
+        rows = directory_listing_rows(listing)
+        assert tuple(row.text for row in render_table(rows).rows) == (
+            f"{'name':<4}  {'size':>12}  {'modified':<20}",
+            "Directory is empty: /empty",
+        )
+        assert rows[0].presentations == (header,)
+        assert rows[1].presentations == ()
+        assert all(row.listing_owner is listing for row in rows)
+
+
+def test_process_table_fixed_cells_truncate_at_the_final_display_cell(
+    domain_types,
+):
+    long_user = "a" * 13 + "é界x"
+    long_command = "x" * 46 + "界needle"
+    listing = ProcessListing(
+        (
+            ProcessListingMember(ProcessRef(2), "sleeping", 1000, "alice", "short"),
+            ProcessListingMember(
+                ProcessRef(700), "running", 1000, long_user, long_command
+            ),
+        )
+    )
+    with pytest.raises(ValueError, match="not bound"):
+        process_listing_rows(listing)
+    header, member_presentations = bind_listing_presentations(listing, domain_types)
+
+    rows = process_listing_rows(listing)
+    rendered = render_table(rows)
+    texts = tuple(row.text for row in rendered.rows)
+    assert texts == (
+        f"{'pid':>10}  {'state':<10}  {'user':<16}  {'command':<48}",
+        f"{2:>10}  {'sleeping':<10}  {'alice':<16}  {'short':<48}",
+        f"{700:>10}  {'running':<10}  {'a' * 13 + 'é …'}  "
+        f"{'x' * 46 + ' …'}",
+    )
+    assert all(display_width(text) == 90 for text in texts)
+    for row_number, presentation in enumerate(
+        (header, member_presentations[0], member_presentations[1])
+    ):
+        assert rows[row_number].presentations == (presentation,)
+        assert all(
+            rendered.hit_test(column, row_number) is presentation
+            for column in range(90)
+        )
+    assert all(
+        presentation.presentation_type is not domain_types.text
+        for row in rows
+        for presentation in row.presentations
+    )
+    assert listing.members[1].displayed_user == long_user
+    assert listing.members[1].command == long_command
+
+    listing.replace_substring_filter("needle")
+    filtered = process_listing_rows(listing)
+    assert filtered[1].presentations == (member_presentations[1],)
+    assert render_table(filtered).rows[1].text.endswith("x" * 46 + " …")
+
+
+def test_process_table_empty_filter_states_and_width_rejections(domain_types):
+    listing = ProcessListing(())
+    header, _members = bind_listing_presentations(listing, domain_types)
+    rows = process_listing_rows(listing)
+    assert tuple(row.text for row in render_table(rows).rows) == (
+        f"{'pid':>10}  {'state':<10}  {'user':<16}  {'command':<48}",
+        "No processes are available.",
+    )
+    assert rows[0].presentations == (header,)
+    assert rows[1].presentations == ()
+
+    listing.replace_sort_key("command")
+    assert render_table(process_listing_rows(listing)).rows[-1].text == (
+        "No processes are available."
+    )
+    listing.replace_kind_filter("running")
+    assert render_table(process_listing_rows(listing)).rows[-1].text == (
+        "Nothing matches the active filters."
+    )
+    listing.widen()
+    listing.replace_substring_filter("missing")
+    assert render_table(process_listing_rows(listing)).rows[-1].text == (
+        "Nothing matches the active filters."
+    )
+
+    impossible = ProcessListing(
+        (
+            ProcessListingMember(
+                ProcessRef(12_345_678_901), "running", 1, "user", "command"
+            ),
+        )
+    )
+    bind_listing_presentations(impossible, domain_types)
+    with pytest.raises(ValueError, match="pid value exceeds 10 display cells"):
+        process_listing_rows(impossible)
+
+
+def test_pure_display_helpers_keep_wide_and_combining_clusters_intact():
+    assert display_width("Aé界") == 4
+    assert truncate_display("界x", 2) == "…"
+    assert truncate_display("Aé界Z", 4) == "Aé…"
+    assert not truncate_display("Aé界Z", 4).endswith("e…")
 
 
 def test_pure_listings_start_unbound_and_binding_preserves_stable_identity(

@@ -19,15 +19,19 @@ from textual.screen import Screen
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
 from textual.widget import Widget
-from wcwidth import wcwidth
 
 from pbui.commands import HeadlessListener
 from pbui.domain import DirectoryRef, FileRef, ProcessRef, escape_display
 from pbui.substrate import DisplayInterval, Presentation
-from pbui.text import Layout, layout
+from pbui.text import (
+    Layout,
+    _character_width,
+    display_width,
+    layout,
+    truncate_display,
+)
 
 
-ELLIPSIS = "…"
 _UNSET = object()
 
 
@@ -37,55 +41,6 @@ def filter_one_row(text: str) -> str:
     if not isinstance(text, str):
         raise TypeError("editor text must be a string")
     return "".join(character for character in text if character.isprintable())
-
-
-def _character_width(character: str) -> int:
-    """Return a harmless display width for already-sanitized product text."""
-
-    return max(0, wcwidth(character))
-
-
-def display_width(text: str) -> int:
-    """Measure a string in terminal display columns."""
-
-    return sum(_character_width(character) for character in text)
-
-
-def _display_clusters(text: str) -> tuple[tuple[str, int], ...]:
-    """Group zero-width marks with the preceding drawn character."""
-
-    clusters: list[tuple[str, int]] = []
-    for character in text:
-        width = _character_width(character)
-        if width == 0 and clusters:
-            cluster, cluster_width = clusters[-1]
-            clusters[-1] = (cluster + character, cluster_width)
-        else:
-            clusters.append((character, width))
-    return tuple(clusters)
-
-
-def truncate_display(text: str, width: int) -> str:
-    """Truncate to display columns, preserving wide/combining characters."""
-
-    if not isinstance(text, str):
-        raise TypeError("text must be a string")
-    if width <= 0:
-        return ""
-    if display_width(text) <= width:
-        return text
-    if width == 1:
-        return ELLIPSIS
-
-    budget = width - 1
-    used = 0
-    retained: list[str] = []
-    for cluster, cluster_width in _display_clusters(text):
-        if used + cluster_width > budget:
-            break
-        retained.append(cluster)
-        used += cluster_width
-    return "".join(retained) + ELLIPSIS
 
 
 def _domain_kind(

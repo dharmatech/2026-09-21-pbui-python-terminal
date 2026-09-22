@@ -25,9 +25,10 @@ from pbui.domain import (
     ProcessListing,
     ProcessRef,
     escape_display,
+    format_utc_timestamp,
 )
 from pbui.substrate import Chip
-from pbui.text import LiteralFragment, layout
+from pbui.text import layout
 
 
 @dataclass
@@ -69,6 +70,34 @@ def make_listener(tmp_path, processes=None, **kwargs):
 
 def history_text(listener):
     return tuple(row.text for row in layout(listener.history, 10_000).rows)
+
+
+PROCESS_HEADER = f"{'pid':>10}  {'state':<10}  {'user':<16}  {'command':<48}"
+
+
+def process_table_row(pid, state, user, command):
+    return f"{pid:>10}  {state:<10}  {user:<16}  {command:<48}"
+
+
+def directory_table_text(listing):
+    visible = listing.visible_members()
+    name_width = max(4, *(len(member.displayed_basename) for member in visible))
+    size_width = max(
+        12,
+        *(
+            len(str(member.size))
+            for member in visible
+            if member.size is not None
+        ),
+    )
+    result = [f"{'name':<{name_width}}  {'size':>{size_width}}  {'modified':<20}"]
+    for member in visible:
+        size = "" if member.size is None else str(member.size)
+        result.append(
+            f"{member.displayed_basename:<{name_width}}  "
+            f"{size:>{size_width}}  {format_utc_timestamp(member.mtime)}"
+        )
+    return tuple(result)
 
 
 def one_presentation(listener, presentation_type, value=None):
@@ -200,10 +229,12 @@ def test_ls_lists_current_objects_in_escaped_display_order(tmp_path):
         "target-dir",
         "target-file",
     ]
-    assert [text[11:] for text in history_text(listener)] == expected_names
+    rows = history_text(listener)
+    assert [text[:11].rstrip() for text in rows[1:]] == expected_names
     by_name = {
         os.path.basename(presentation.value.path): presentation
         for presentation in listener.history.presentations
+        if type(presentation.value) in {FileRef, DirectoryRef}
     }
     assert by_name["B"].type is listener.types.directory
     assert by_name["dir-link"].type is listener.types.directory
@@ -211,10 +242,14 @@ def test_ls_lists_current_objects_in_escaped_display_order(tmp_path):
     assert by_name["broken-link"].type is listener.types.file
 
     rendered = layout(listener.history, 10_000)
-    row = rendered.rows[2]
-    assert rendered.hit_test(0, 2) is None
-    assert rendered.hit_test(11, 2).value == FileRef(str(tmp_path / "a name"))
-    assert row.text == "file       a name"
+    row = rendered.rows[3]
+    presentation = rendered.hit_test(0, 3)
+    assert presentation.value == FileRef(str(tmp_path / "a name"))
+    assert all(
+        rendered.hit_test(column, 3) is presentation
+        for column in range(row.display_width)
+    )
+    assert row.text.startswith("a name")
 
 
 def test_ls_empty_and_expected_failures_leave_listener_usable(tmp_path):
@@ -230,10 +265,11 @@ def test_ls_empty_and_expected_failures_leave_listener_usable(tmp_path):
     listener.submit("show ordinary")
 
     rows = history_text(listener)
-    assert rows[0] == f"Directory is empty: {empty}"
-    assert rows[1] == f"Error: not a directory: {ordinary}"
-    assert rows[2].startswith("Error: path does not exist:")
-    assert rows[3].startswith(f"path: {ordinary} | type: file")
+    assert rows[0] == f"{'name':<4}  {'size':>12}  {'modified':<20}"
+    assert rows[1] == f"Directory is empty: {empty}"
+    assert rows[2] == f"Error: not a directory: {ordinary}"
+    assert rows[3].startswith("Error: path does not exist:")
+    assert rows[4].startswith(f"path: {ordinary} | type: file")
 
 
 def test_ls_reports_rooted_permission_failure_without_escaping(tmp_path):
@@ -361,9 +397,17 @@ def test_ps_filters_sorts_keeps_own_pid_and_presents_only_pid(tmp_path):
 
     listener.submit("ps")
 
-    assert history_text(listener) == ("2  sleeping  two", r"700  running  pbui\x00raw")
+    assert history_text(listener) == (
+        PROCESS_HEADER,
+        process_table_row(2, "sleeping", "1000", "two"),
+        process_table_row(700, "running", "1000", r"pbui\x00raw"),
+    )
     presentations = listener.history.presentations
-    assert [item.value for item in presentations] == [ProcessRef(2), ProcessRef(700)]
+    assert type(presentations[0].value) is ProcessListing
+    assert [item.value for item in presentations[1:]] == [
+        ProcessRef(2),
+        ProcessRef(700),
+    ]
 
 
 def test_show_covers_files_directories_links_broken_and_current_type(tmp_path):
@@ -618,8 +662,10 @@ def test_missing_ls_runs_cwd_and_missing_ps_runs_immediately(tmp_path):
     listener.submit("ps")
 
     assert history_text(listener) == (
+        f"{'name':<4}  {'size':>12}  {'modified':<20}",
         f"Directory is empty: {tmp_path}",
-        "9  idle  worker",
+        PROCESS_HEADER,
+        process_table_row(9, "idle", "1000", "worker"),
     )
     assert listener.pending_request is None
 
@@ -733,7 +779,7 @@ def test_ls_captures_metadata_and_stable_presentations_once_then_refreshes(tmp_p
     assert all(row.listing_owner is listing for row in listener.history.rows)
     assert listing.header_presentation.type is listener.types.directory_listing
     assert listing.header_presentation.value is listing
-    assert listing.header_presentation not in listener.history.presentations
+    assert listing.header_presentation in listener.history.presentations
     assert len(listing.member_presentations) == len(listing.members) == 6
 
     members = {member.displayed_basename: member for member in listing.members}
@@ -762,18 +808,18 @@ def test_ls_captures_metadata_and_stable_presentations_once_then_refreshes(tmp_p
             else listener.types.file
         )
         assert presentation.type is expected_type
-    assert {row.presentations[0] for row in listener.history.rows} == set(
-        listing.member_presentations
-    )
-    assert history_text(listener) == tuple(
-        (
-            "directory  "
-            if type(member.reference) is DirectoryRef
-            else "file       "
+    assert {row.presentations[0] for row in listener.history.rows} == {
+        listing.header_presentation,
+        *listing.member_presentations,
+    }
+    assert history_text(listener) == directory_table_text(listing)
+    rendered = layout(listener.history, 10_000)
+    for row_number, row in enumerate(rendered.rows):
+        presentation = listener.history.rows[row_number].presentations[0]
+        assert all(
+            rendered.hit_test(column, row_number) is presentation
+            for column in range(row.display_width)
         )
-        + member.displayed_basename
-        for member in listing.visible_members()
-    )
 
     captured_snapshot = tuple(
         (member.reference, member.displayed_basename, member.size, member.mtime)
@@ -883,18 +929,28 @@ def test_empty_ls_and_ps_retain_bound_listing_targets(tmp_path):
     assert directory_listing.members == ()
     assert directory_listing.member_presentations == ()
     assert directory_listing.header_presentation.value is directory_listing
-    assert history_text(listener) == (f"Directory is empty: {empty}",)
+    assert history_text(listener) == (
+        f"{'name':<4}  {'size':>12}  {'modified':<20}",
+        f"Directory is empty: {empty}",
+    )
+    assert listener.history.rows[0].presentations == (
+        directory_listing.header_presentation,
+    )
+    assert listener.history.rows[1].presentations == ()
 
     listener.submit("ps")
-    process_row = listener.history.rows[-1]
-    process_listing = process_row.listing_owner
+    process_rows = listener.history.rows[-2:]
+    process_listing = process_rows[0].listing_owner
     assert type(process_listing) is ProcessListing
     assert process_listing.members == ()
     assert process_listing.member_presentations == ()
     assert process_listing.header_presentation.value is process_listing
-    assert process_row.fragments == (LiteralFragment(""),)
-    assert process_row.presentations == ()
-    assert history_text(listener)[-1] == ""
+    assert process_rows[0].presentations == (process_listing.header_presentation,)
+    assert process_rows[1].presentations == ()
+    assert history_text(listener)[-2:] == (
+        PROCESS_HEADER,
+        "No processes are available.",
+    )
 
 
 def test_ps_captures_filtered_cached_members_and_owned_presentations(tmp_path):
@@ -933,22 +989,26 @@ def test_ps_captures_filtered_cached_members_and_owned_presentations(tmp_path):
         r"two\targs",
     ]
     assert history_text(listener) == (
-        r"2  sleeping  two\targs",
-        r"700  running  pbui\nfull\\command",
+        PROCESS_HEADER,
+        process_table_row(2, "sleeping", r"ali\nce", r"two\targs"),
+        process_table_row(
+            700, "running", r"ali\nce", r"pbui\nfull\\command"
+        ),
     )
     assert all(row.listing_owner is listing for row in listener.history.rows)
     assert listing.header_presentation.type is listener.types.process_listing
     assert listing.header_presentation.value is listing
-    assert listing.header_presentation not in listener.history.presentations
+    assert listing.header_presentation in listener.history.presentations
     assert len(listing.member_presentations) == 2
     for member, presentation in zip(
         listing.members, listing.member_presentations, strict=True
     ):
         assert presentation.type is listener.types.process
         assert presentation.value is member.reference
-    assert {row.presentations[0] for row in listener.history.rows} == set(
-        listing.member_presentations
-    )
+    assert {row.presentations[0] for row in listener.history.rows} == {
+        listing.header_presentation,
+        *listing.member_presentations,
+    }
 
 
 def test_ps_username_failures_fall_back_to_decimal_uid(tmp_path):
@@ -970,6 +1030,10 @@ def test_ps_username_failures_fall_back_to_decimal_uid(tmp_path):
 
         (listing,) = listing_owners(listener)
         assert listing.members[0].displayed_user == "1000"
+        assert history_text(listener) == (
+            PROCESS_HEADER,
+            process_table_row(5, "idle", "1000", "worker"),
+        )
 
 
 def test_ps_capture_is_stable_and_a_later_command_is_fresh(tmp_path):
@@ -1193,7 +1257,10 @@ def test_narrow_preserves_rest_of_line_and_widen_preserves_sort(tmp_path):
     listener.submit("narrow a b  ")
 
     assert listing.view.substring_filter == "a b  "
-    assert history_text(listener) == ("9  sleeping  before a b  ",)
+    assert history_text(listener) == (
+        PROCESS_HEADER,
+        process_table_row(9, "sleeping", "1000", "before a b  "),
+    )
 
     listener.submit("only sleeping")
     assert listing.view.kind_filter == "sleeping"
@@ -1202,12 +1269,13 @@ def test_narrow_preserves_rest_of_line_and_widen_preserves_sort(tmp_path):
     assert listing.view.substring_filter is None
     assert listing.view.kind_filter is None
     assert history_text(listener) == (
-        "9  sleeping  before a b  ",
-        "2  running  unmatched",
+        PROCESS_HEADER,
+        process_table_row(9, "sleeping", "1000", "before a b  "),
+        process_table_row(2, "running", "1000", "unmatched"),
     )
 
 
-def test_empty_listing_redisplay_uses_transitional_owner_rows(tmp_path):
+def test_empty_listing_redisplay_keeps_headers_and_explanatory_rows(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     listener = make_listener(tmp_path)
@@ -1215,21 +1283,30 @@ def test_empty_listing_redisplay_uses_transitional_owner_rows(tmp_path):
     directory_listing = listener.history.rows[0].listing_owner
 
     listener.submit("sort size")
-    assert history_text(listener) == (f"Directory is empty: {empty}",)
+    assert history_text(listener) == (
+        f"{'name':<4}  {'size':>12}  {'modified':<20}",
+        f"Directory is empty: {empty}",
+    )
     assert listener.history.rows[0].listing_owner is directory_listing
 
     listener.submit("only files")
-    assert history_text(listener) == ("",)
-    assert listener.history.rows[0].presentations == ()
-    assert listener.history.rows[0].listing_owner is directory_listing
+    assert history_text(listener)[-1] == f"Directory is empty: {empty}"
+    assert listener.history.rows[0].presentations == (
+        directory_listing.header_presentation,
+    )
+    assert listener.history.rows[1].presentations == ()
+    assert listener.history.rows[1].listing_owner is directory_listing
 
     listener.submit("widen")
-    assert history_text(listener) == (f"Directory is empty: {empty}",)
+    assert history_text(listener)[-1] == f"Directory is empty: {empty}"
 
     listener.submit("ps")
-    process_listing = listener.history.rows[-1].listing_owner
+    process_listing = listener.history.rows[-2].listing_owner
     listener.submit("sort command")
-    assert history_text(listener)[-1] == ""
+    assert history_text(listener)[-2:] == (
+        PROCESS_HEADER,
+        "No processes are available.",
+    )
     assert listener.history.rows[-1].presentations == ()
     assert listener.history.rows[-1].listing_owner is process_listing
 
@@ -1262,9 +1339,10 @@ def test_typed_and_explicit_targets_replace_their_blocks_in_place(tmp_path):
     assert listener.history.revision == revision + 1
     assert listener.history.rows[len(directory_rows)] is separator
     assert tuple(listener.history.rows[: len(directory_rows)]) == directory_rows
-    assert history_text(listener)[-2:] == (
-        "2  running  a-command",
-        "9  sleeping  z-command",
+    assert history_text(listener)[-3:] == (
+        PROCESS_HEADER,
+        process_table_row(2, "running", "1000", "a-command"),
+        process_table_row(9, "sleeping", "1000", "z-command"),
     )
 
     process_rows = tuple(
@@ -1276,13 +1354,10 @@ def test_typed_and_explicit_targets_replace_their_blocks_in_place(tmp_path):
     assert directory_listing.view.sort_key == "size"
     assert process_listing.view.sort_key == "command"
     assert listener.history.revision == revision + 1
-    assert listener.history.rows[2] is separator
-    assert tuple(listener.history.rows[-2:]) == process_rows
-    assert history_text(listener)[:2] == (
-        "file       large",
-        "file       small",
-    )
-    assert len(listener.history.rows) == 5
+    assert listener.history.rows[len(directory_rows)] is separator
+    assert tuple(listener.history.rows[-3:]) == process_rows
+    assert history_text(listener)[:3] == directory_table_text(directory_listing)
+    assert len(listener.history.rows) == 7
 
 
 def test_partial_listing_is_targeted_and_evicted_listing_is_rejected(tmp_path):
@@ -1299,6 +1374,13 @@ def test_partial_listing_is_targeted_and_evicted_listing_is_rejected(tmp_path):
     assert listing.view.sort_key == "size"
     assert len(listener.history.rows) == 2
     assert all(row.listing_owner is listing for row in listener.history.rows)
+    assert listing.header_presentation not in listener.history.presentations
+
+    listener.submit("narrow c")
+    assert listener.history.rows[0].presentations == (
+        listing.header_presentation,
+    )
+    assert listener.history.presentations[0] is listing.header_presentation
 
     listener._append_error("first eviction.")
     listener._append_error("second eviction.")
@@ -1369,27 +1451,28 @@ def test_directory_redisplay_uses_cached_sort_filter_and_tie_breakers(tmp_path):
     listener.submit("ls")
     (listing,) = listing_owners(listener)
 
-    assert history_text(listener) == (
-        "file       a-file",
-        "directory  directory",
-        "file       z-file",
-    )
+    assert history_text(listener) == directory_table_text(listing)
     listener.submit("sort size")
-    assert history_text(listener) == (
-        "file       a-file",
-        "file       z-file",
-        "directory  directory",
-    )
+    assert history_text(listener) == directory_table_text(listing)
+    assert [member.displayed_basename for member in listing.visible_members()] == [
+        "a-file",
+        "z-file",
+        "directory",
+    ]
     listener.submit("sort mtime")
-    assert history_text(listener) == (
-        "directory  directory",
-        "file       a-file",
-        "file       z-file",
-    )
+    assert history_text(listener) == directory_table_text(listing)
+    assert [member.displayed_basename for member in listing.visible_members()] == [
+        "directory",
+        "a-file",
+        "z-file",
+    ]
 
     listener.submit(f"narrow {tmp_path.name}")
     assert listing.view.substring_filter == tmp_path.name
-    assert history_text(listener) == ("",)
+    assert history_text(listener) == (
+        f"{'name':<4}  {'size':>12}  {'modified':<20}",
+        "Nothing matches the active filters.",
+    )
 
 
 def test_process_redisplay_uses_full_cached_command_and_tie_breakers(tmp_path):
@@ -1407,8 +1490,8 @@ def test_process_redisplay_uses_full_cached_command_and_tie_breakers(tmp_path):
 
     listener.submit("sort state")
     displayed_pids = [
-        row.text.split("  ", 1)[0]
-        for row in layout(listener.history, 10_000).rows
+        row.text[:10].strip()
+        for row in layout(listener.history, 10_000).rows[1:]
     ]
     assert displayed_pids == [
         "5",
@@ -1417,8 +1500,8 @@ def test_process_redisplay_uses_full_cached_command_and_tie_breakers(tmp_path):
     ]
     listener.submit("sort command")
     displayed_pids = [
-        row.text.split("  ", 1)[0]
-        for row in layout(listener.history, 10_000).rows
+        row.text[:10].strip()
+        for row in layout(listener.history, 10_000).rows[1:]
     ]
     assert displayed_pids == [
         "2",
@@ -1429,7 +1512,20 @@ def test_process_redisplay_uses_full_cached_command_and_tie_breakers(tmp_path):
     listener.submit("only running")
     assert listing.view.substring_filter == "needle"
     assert listing.view.kind_filter == "running"
-    assert history_text(listener) == (f"5  running  {long_prefix}needle",)
+    assert history_text(listener) == (
+        PROCESS_HEADER,
+        process_table_row(
+            5,
+            "running",
+            "1000",
+            f"{'x' * 47}…",
+        ),
+    )
+    assert listing.members[2].command == f"{long_prefix}needle"
+    listener.submit("show 5")
+    assert history_text(listener)[-1] == (
+        f"pid: 5 | command: {long_prefix}needle | state: running"
+    )
 
 
 def test_modal_narrow_binds_original_listing_and_preserves_buffer_verbatim(tmp_path):
@@ -1465,8 +1561,10 @@ def test_modal_narrow_binds_original_listing_and_preserves_buffer_verbatim(tmp_p
     assert directory_listing.view.substring_filter == " alpha "
     assert listener.pending_substring_listing is None
     assert listener.input_text == ""
-    assert history_text(listener)[0] == "file        alpha "
-    assert history_text(listener)[-1] == "8  sleeping  newer"
+    assert history_text(listener)[1].startswith(" alpha ")
+    assert history_text(listener)[-1] == process_table_row(
+        8, "sleeping", "1000", "newer"
+    )
 
 
 def test_modal_narrow_cancel_and_selection_are_atomic(tmp_path):

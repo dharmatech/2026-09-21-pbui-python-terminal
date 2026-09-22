@@ -33,7 +33,12 @@ from pbui.terminal import (
     presentation_style,
     truncate_display,
 )
-from pbui.text import DrawingContext, layout
+from pbui.text import (
+    DrawingContext,
+    display_width as pure_display_width,
+    layout,
+    truncate_display as pure_truncate_display,
+)
 
 
 PROJECT_ROOT = Path(__file__).parents[1]
@@ -262,8 +267,8 @@ async def test_large_wrapped_process_history_rebuilds_only_hover_rows(
 ):
     process_count = 240
     records = {
-        int(f"{index + 1:03d}" + "7" * 72): InspectedProcess(
-            int(f"{index + 1:03d}" + "7" * 72),
+        index + 1: InspectedProcess(
+            index + 1,
             1000,
             "sleeping",
             f"worker-{index:03d} [literal] " + f"argument-{index:03d} " * 12,
@@ -303,13 +308,23 @@ async def test_large_wrapped_process_history_rebuilds_only_hover_rows(
                 for row in surface.current_layout.rows
                 if row.logical_row == logical_row
             )
-            for logical_row in range(process_count)
+            for logical_row in range(process_count + 1)
+        }
+        assert logical_text[0] == (
+            f"{'pid':>10}  {'state':<10}  {'user':<16}  {'command':<48}"
+        )
+        listing = listener.history.rows[0].listing_owner
+        displayed_users = {
+            member.reference.pid: member.displayed_user for member in listing.members
         }
         for logical_row, record in enumerate(
-            sorted(records.values(), key=lambda item: item.pid)
+            sorted(records.values(), key=lambda item: item.pid), start=1
         ):
+            command = pure_truncate_display(record.command, 48)
             assert logical_text[logical_row] == (
-                f"{record.pid}  {record.state}  {record.command}"
+                f"{record.pid:>10}  {record.state:<10}  "
+                f"{displayed_users[record.pid]:<16}  "
+                f"{command:<48}"
             )
 
         original_builder = terminal_module.build_history_row_text
@@ -500,6 +515,8 @@ def test_documentation_truncation_is_one_row_and_display_safe(tmp_path):
     assert truncate_display("Aé界Z", 4) == "Aé…"
     assert display_width(truncate_display("Aé界Z", 4)) <= 4
     assert not truncate_display("Aé界Z", 4).endswith("e…")
+    assert terminal_module.display_width is pure_display_width
+    assert terminal_module.truncate_display is pure_truncate_display
 
 
 def test_prompt_cursor_and_atomic_chip_are_passive_listener_drawing(tmp_path):
@@ -820,11 +837,13 @@ async def test_coordinates_hover_click_selection_and_literal_misses(tmp_path, mo
         move = _mouse_event(events.MouseMove, surface, x, y)
         assert surface.content_offset_from_event(move) == Offset(x, y)
         assert surface.presentation_at_content_offset(x, y) is target_presentation
-        assert surface.presentation_at_content_offset(0, y) is None
+        assert surface.presentation_at_content_offset(0, y) is target_presentation
+        literal_x = surface.current_layout.rows[interval.physical_row].display_width + 1
+        assert surface.presentation_at_content_offset(literal_x, y) is None
 
         assert app.screen.command_input.has_focus
         assert not surface.can_focus
-        await pilot.click(surface, offset=(0, y))
+        await pilot.click(surface, offset=(literal_x, y))
         assert app.screen.command_input.has_focus
 
         surface.on_mouse_move(move)
@@ -914,11 +933,15 @@ async def test_click_uses_original_objects_for_accept_default_and_refusals(tmp_p
         assert str(directory) in listener.history.presentations[-1].value
 
         revision = listener.history.revision
-        literal_interval = directory_presentation.intervals[0]
-        surface.scroll_to_row(literal_interval.physical_row)
-        y = literal_interval.physical_row - int(surface.scroll_y)
+        directory_interval = directory_presentation.intervals[0]
+        surface.scroll_to_row(directory_interval.physical_row)
+        y = directory_interval.physical_row - int(surface.scroll_y)
+        literal_x = (
+            surface.current_layout.rows[directory_interval.physical_row].display_width
+            + 1
+        )
         surface.on_click(
-            _mouse_event(events.Click, surface, 0, y, button=1)
+            _mouse_event(events.Click, surface, literal_x, y, button=1)
         )
         assert listener.history.revision == revision
 

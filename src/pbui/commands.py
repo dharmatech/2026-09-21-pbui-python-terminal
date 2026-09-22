@@ -29,8 +29,8 @@ from pbui.domain import (
     ProcessRef,
     TypedDomainValue,
     compose_failure_message,
+    directory_listing_rows,
     escape_display,
-    format_empty_directory,
     format_path_detail,
     format_process_detail,
     format_removed_file,
@@ -40,6 +40,7 @@ from pbui.domain import (
     parse_file,
     parse_process,
     parse_show,
+    process_listing_rows,
     register_domain_types,
 )
 from pbui.substrate import (
@@ -52,7 +53,7 @@ from pbui.substrate import (
     SubstrateState,
     TranslatorTable,
 )
-from pbui.text import HistoryRow, LiteralFragment, PresentedFragment
+from pbui.text import HistoryRow
 
 
 @dataclass(frozen=True, slots=True)
@@ -686,10 +687,6 @@ class HeadlessListener:
             raise NotADirectoryError("Not a directory")
         return result
 
-    @staticmethod
-    def _owned_row(row: HistoryRow, listing: object) -> HistoryRow:
-        return HistoryRow(row.fragments, row.presentations, listing)
-
     def _newest_retained_listing(
         self,
     ) -> DirectoryListing | ProcessListing | None:
@@ -818,62 +815,18 @@ class HeadlessListener:
     def _listing_rows(
         self, listing: DirectoryListing | ProcessListing
     ) -> tuple[HistoryRow, ...]:
-        presentations_by_member = {
-            id(member): presentation
-            for member, presentation in zip(
-                listing.members, listing.member_presentations, strict=True
-            )
-        }
-        visible_members = listing.visible_members()
-        if not visible_members:
-            if (
-                type(listing) is DirectoryListing
-                and not listing.members
-                and listing.view.substring_filter is None
-                and listing.view.kind_filter is None
-            ):
-                row = self._contexts.standalone.present_row(
-                    format_empty_directory(listing.directory), self._types.text
-                )
-                return (self._owned_row(row, listing),)
-            return (HistoryRow((LiteralFragment(""),), (), listing),)
-
-        rows: list[HistoryRow] = []
-        for member in visible_members:
-            presentation = presentations_by_member[id(member)]
-            if type(listing) is DirectoryListing:
-                prefix = (
-                    "directory  "
-                    if type(member.reference) is DirectoryRef
-                    else "file       "
-                )
-                displayed = PresentedFragment(
-                    presentation.id,
-                    (LiteralFragment(member.displayed_basename),),
-                )
-                row = self._contexts.listing.row(prefix, displayed)
-            else:
-                displayed = PresentedFragment(
-                    presentation.id,
-                    (LiteralFragment(str(member.reference.pid)),),
-                )
-                row = self._contexts.listing.row(
-                    displayed,
-                    "  ",
-                    member.state,
-                    "  ",
-                    member.command,
-                )
-            rows.append(self._owned_row(row, listing))
-        return tuple(rows)
+        if type(listing) is DirectoryListing:
+            return directory_listing_rows(listing)
+        if type(listing) is ProcessListing:
+            return process_listing_rows(listing)
+        raise TypeError("listing rows require an exact listing value")
 
     def _allocate_directory_presentations(
         self, listing: DirectoryListing
-    ) -> tuple[PresentedFragment, ...]:
+    ) -> None:
         context = self._contexts.listing
         header_fragment = context.present(listing, self._types.directory_listing)
         header = context.presentation(header_fragment.presentation_id)
-        fragments: list[PresentedFragment] = []
         presentations: list[Presentation] = []
         for member in listing.members:
             presentation_type = (
@@ -882,25 +835,20 @@ class HeadlessListener:
                 else self._types.file
             )
             fragment = context.present(member.reference, presentation_type)
-            fragments.append(fragment)
             presentations.append(context.presentation(fragment.presentation_id))
         listing.bind_presentations(header, presentations, self._types)
-        return tuple(fragments)
 
     def _allocate_process_presentations(
         self, listing: ProcessListing
-    ) -> tuple[PresentedFragment, ...]:
+    ) -> None:
         context = self._contexts.listing
         header_fragment = context.present(listing, self._types.process_listing)
         header = context.presentation(header_fragment.presentation_id)
-        fragments: list[PresentedFragment] = []
         presentations: list[Presentation] = []
         for member in listing.members:
             fragment = context.present(member.reference, self._types.process)
-            fragments.append(fragment)
             presentations.append(context.presentation(fragment.presentation_id))
         listing.bind_presentations(header, presentations, self._types)
-        return tuple(fragments)
 
     def _command_ls(self, value: object | None) -> None:
         if type(value) is not DirectoryRef:
@@ -943,32 +891,9 @@ class HeadlessListener:
             return
 
         listing = DirectoryListing(value, captured_members)
-        member_fragments = self._allocate_directory_presentations(listing)
-        if not listing.members:
-            row = self._contexts.standalone.present_row(
-                format_empty_directory(value), self._types.text
-            )
-            self._history.append(self._owned_row(row, listing))
-            return
-        fragments_by_member = {
-            id(member): fragment
-            for member, fragment in zip(
-                listing.members, member_fragments, strict=True
-            )
-        }
-        for member in listing.visible_members():
-            prefix = (
-                "directory  "
-                if type(member.reference) is DirectoryRef
-                else "file       "
-            )
-            allocated = fragments_by_member[id(member)]
-            displayed = PresentedFragment(
-                allocated.presentation_id,
-                (LiteralFragment(member.displayed_basename),),
-            )
-            row = self._contexts.listing.row(prefix, displayed)
-            self._history.append(self._owned_row(row, listing))
+        self._allocate_directory_presentations(listing)
+        for row in self._listing_rows(listing):
+            self._history.append(row)
 
     def _command_ps(self) -> None:
         try:
@@ -999,27 +924,9 @@ class HeadlessListener:
             return
 
         listing = ProcessListing(captured_members)
-        member_fragments = self._allocate_process_presentations(listing)
-        if not listing.members:
-            self._history.append(
-                HistoryRow((LiteralFragment(""),), (), listing)
-            )
-            return
-        fragments_by_member = {
-            id(member): fragment
-            for member, fragment in zip(
-                listing.members, member_fragments, strict=True
-            )
-        }
-        for member in listing.visible_members():
-            row = self._contexts.listing.row(
-                fragments_by_member[id(member)],
-                "  ",
-                member.state,
-                "  ",
-                member.command,
-            )
-            self._history.append(self._owned_row(row, listing))
+        self._allocate_process_presentations(listing)
+        for row in self._listing_rows(listing):
+            self._history.append(row)
 
     def _command_show(self, value: object | None) -> None:
         if type(value) is ProcessRef:
