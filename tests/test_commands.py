@@ -118,7 +118,18 @@ def test_composition_is_coherent_bounded_and_never_changes_process_cwd(tmp_path)
         "DirectoryListing",
         "ProcessListing",
     ]
-    assert listener.command_names == ("ls", "ps", "show", "kill", "cd", "rm")
+    assert listener.command_names == (
+        "ls",
+        "ps",
+        "show",
+        "kill",
+        "cd",
+        "rm",
+        "sort",
+        "narrow",
+        "only",
+        "widen",
+    )
     assert listener.filesystem.allowed_root == str(tmp_path)
     assert listener.processes is processes
     assert listener.translators.lookup(listener.types.file) is not None
@@ -1027,3 +1038,529 @@ def test_listing_owner_survives_suffix_eviction_then_disappears(tmp_path):
 
     assert all(row.listing_owner is None for row in listener.history.rows)
     assert not any(row.listing_owner is owner for row in listener.history.rows)
+
+
+def test_view_commands_require_a_retained_listing_before_grammar(tmp_path):
+    listener = make_listener(tmp_path)
+
+    for command in ("sort", "narrow value", "only two words", "widen extra"):
+        listener.set_input_text(command)
+        listener.submit()
+        assert listener.input_text == ""
+        assert listener.pending_request is None
+        assert listener.pending_substring_listing is None
+        assert listener.chip is None
+
+    assert history_text(listener) == (
+        "Error: no listing in history.",
+        "Error: no listing in history.",
+        "Error: no listing in history.",
+        "Error: no listing in history.",
+    )
+
+
+@pytest.mark.parametrize("sort_key", ("name", "size", "mtime"))
+def test_directory_sort_words_dispatch_through_the_listing_model(tmp_path, sort_key):
+    (tmp_path / "file").write_text("data")
+    (tmp_path / "directory").mkdir()
+    listener = make_listener(tmp_path)
+    listener.submit("ls")
+    (listing,) = listing_owners(listener)
+
+    listener.submit(f"sort {sort_key}")
+
+    assert listing.view.sort_key == sort_key
+    assert all(row.listing_owner is listing for row in listener.history.rows)
+
+
+@pytest.mark.parametrize("kind", ("files", "directories"))
+def test_directory_only_words_dispatch_through_the_listing_model(tmp_path, kind):
+    (tmp_path / "file").write_text("data")
+    (tmp_path / "directory").mkdir()
+    listener = make_listener(tmp_path)
+    listener.submit("ls")
+    (listing,) = listing_owners(listener)
+
+    listener.submit(f"only {kind}")
+
+    assert listing.view.kind_filter == kind
+
+
+@pytest.mark.parametrize("sort_key", ("pid", "state", "command"))
+def test_process_sort_words_dispatch_through_the_listing_model(tmp_path, sort_key):
+    processes = FixedProcesses(
+        records={8: InspectedProcess(8, 1000, "sleeping", "worker")}
+    )
+    listener = make_listener(tmp_path, processes)
+    listener.submit("ps")
+    (listing,) = listing_owners(listener)
+
+    listener.submit(f"sort {sort_key}")
+
+    assert listing.view.sort_key == sort_key
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        "running",
+        "sleeping",
+        "disk-sleep",
+        "stopped",
+        "tracing",
+        "zombie",
+        "dead",
+        "idle",
+        "unknown",
+    ),
+)
+def test_process_only_words_dispatch_through_the_listing_model(tmp_path, kind):
+    processes = FixedProcesses(
+        records={8: InspectedProcess(8, 1000, "sleeping", "worker")}
+    )
+    listener = make_listener(tmp_path, processes)
+    listener.submit("ps")
+    (listing,) = listing_owners(listener)
+
+    listener.submit(f"only {kind}")
+
+    assert listing.view.kind_filter == kind
+
+
+def test_view_command_grammar_value_errors_and_atomic_views(tmp_path):
+    (tmp_path / "file").write_text("data")
+    listener = make_listener(tmp_path)
+    listener.submit("ls")
+    (directory_listing,) = listing_owners(listener)
+    original = directory_listing.view
+
+    for command, message in (
+        ("sort", "Error: sort requires one key."),
+        ("sort name extra", "Error: sort requires one key."),
+        ("only", "Error: only requires one word."),
+        ("only files ", "Error: only requires one word."),
+        ("widen extra", "Error: widen does not take an argument."),
+        ("sort pid", "Error: cannot sort this directory listing by pid."),
+        (
+            "only running",
+            "Error: cannot apply only running to this directory listing.",
+        ),
+        (
+            "sort bad\0key",
+            r"Error: cannot sort this directory listing by bad\x00key.",
+        ),
+        (
+            "only bad\\kind",
+            r"Error: cannot apply only bad\\kind to this directory listing.",
+        ),
+    ):
+        listener.submit(command)
+        assert history_text(listener)[-1] == message
+        assert directory_listing.view is original
+
+    processes = FixedProcesses(
+        records={8: InspectedProcess(8, 1000, "sleeping", "worker")}
+    )
+    listener = make_listener(tmp_path, processes)
+    listener.submit("ps")
+    (process_listing,) = listing_owners(listener)
+    original = process_listing.view
+
+    listener.submit("sort name")
+    assert history_text(listener)[-1] == (
+        "Error: cannot sort this process listing by name."
+    )
+    assert process_listing.view is original
+    listener.submit("only files")
+    assert history_text(listener)[-1] == (
+        "Error: cannot apply only files to this process listing."
+    )
+    assert process_listing.view is original
+
+
+def test_narrow_preserves_rest_of_line_and_widen_preserves_sort(tmp_path):
+    processes = FixedProcesses(
+        records={
+            9: InspectedProcess(9, 1000, "sleeping", "before a b  "),
+            2: InspectedProcess(2, 1000, "running", "unmatched"),
+        }
+    )
+    listener = make_listener(tmp_path, processes)
+    listener.submit("ps")
+    (listing,) = listing_owners(listener)
+
+    listener.submit("sort command")
+    listener.submit("narrow a b  ")
+
+    assert listing.view.substring_filter == "a b  "
+    assert history_text(listener) == ("9  sleeping  before a b  ",)
+
+    listener.submit("only sleeping")
+    assert listing.view.kind_filter == "sleeping"
+    listener.submit("widen")
+    assert listing.view.sort_key == "command"
+    assert listing.view.substring_filter is None
+    assert listing.view.kind_filter is None
+    assert history_text(listener) == (
+        "9  sleeping  before a b  ",
+        "2  running  unmatched",
+    )
+
+
+def test_empty_listing_redisplay_uses_transitional_owner_rows(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    listener = make_listener(tmp_path)
+    listener.submit("ls empty")
+    directory_listing = listener.history.rows[0].listing_owner
+
+    listener.submit("sort size")
+    assert history_text(listener) == (f"Directory is empty: {empty}",)
+    assert listener.history.rows[0].listing_owner is directory_listing
+
+    listener.submit("only files")
+    assert history_text(listener) == ("",)
+    assert listener.history.rows[0].presentations == ()
+    assert listener.history.rows[0].listing_owner is directory_listing
+
+    listener.submit("widen")
+    assert history_text(listener) == (f"Directory is empty: {empty}",)
+
+    listener.submit("ps")
+    process_listing = listener.history.rows[-1].listing_owner
+    listener.submit("sort command")
+    assert history_text(listener)[-1] == ""
+    assert listener.history.rows[-1].presentations == ()
+    assert listener.history.rows[-1].listing_owner is process_listing
+
+
+def test_typed_and_explicit_targets_replace_their_blocks_in_place(tmp_path):
+    (tmp_path / "large").write_text("12345")
+    (tmp_path / "small").write_text("x")
+    processes = FixedProcesses(
+        records={
+            9: InspectedProcess(9, 1000, "sleeping", "z-command"),
+            2: InspectedProcess(2, 1000, "running", "a-command"),
+        }
+    )
+    listener = make_listener(tmp_path, processes)
+    listener.submit("ls")
+    (directory_listing,) = listing_owners(listener)
+    listener.submit("unknown-between")
+    separator = listener.history.rows[-1]
+    listener.submit("ps")
+    directory_listing, process_listing = listing_owners(listener)
+    directory_rows = tuple(
+        row for row in listener.history.rows if row.listing_owner is directory_listing
+    )
+    revision = listener.history.revision
+
+    listener.submit("sort command")
+
+    assert process_listing.view.sort_key == "command"
+    assert directory_listing.view.sort_key == "name"
+    assert listener.history.revision == revision + 1
+    assert listener.history.rows[len(directory_rows)] is separator
+    assert tuple(listener.history.rows[: len(directory_rows)]) == directory_rows
+    assert history_text(listener)[-2:] == (
+        "2  running  a-command",
+        "9  sleeping  z-command",
+    )
+
+    process_rows = tuple(
+        row for row in listener.history.rows if row.listing_owner is process_listing
+    )
+    revision = listener.history.revision
+    assert listener.apply_listing_view(directory_listing, "sort", "size")
+
+    assert directory_listing.view.sort_key == "size"
+    assert process_listing.view.sort_key == "command"
+    assert listener.history.revision == revision + 1
+    assert listener.history.rows[2] is separator
+    assert tuple(listener.history.rows[-2:]) == process_rows
+    assert history_text(listener)[:2] == (
+        "file       large",
+        "file       small",
+    )
+    assert len(listener.history.rows) == 5
+
+
+def test_partial_listing_is_targeted_and_evicted_listing_is_rejected(tmp_path):
+    for name in ("a", "b", "c"):
+        (tmp_path / name).write_text(name)
+    listener = make_listener(tmp_path, history_max_rows=2)
+    listener.submit("ls")
+    listing = listener.history.rows[0].listing_owner
+    assert type(listing) is DirectoryListing
+    assert len(listener.history.rows) == 2
+
+    listener.submit("sort size")
+
+    assert listing.view.sort_key == "size"
+    assert len(listener.history.rows) == 2
+    assert all(row.listing_owner is listing for row in listener.history.rows)
+
+    listener._append_error("first eviction.")
+    listener._append_error("second eviction.")
+    retained_snapshot = listener.history.rows
+    view_snapshot = listing.view
+    assert not listener.apply_listing_view(listing, "sort", "name")
+    assert listing.view is view_snapshot
+    assert listener.history.rows == retained_snapshot
+
+
+def test_filter_and_widen_reuse_exact_directory_and_process_presentations(tmp_path):
+    (tmp_path / "alpha").write_text("a")
+    (tmp_path / "beta").write_text("b")
+    processes = FixedProcesses(
+        records={
+            1: InspectedProcess(1, 1000, "running", "alpha-process"),
+            2: InspectedProcess(2, 1000, "sleeping", "beta-process"),
+        }
+    )
+    listener = make_listener(tmp_path, processes)
+    listener.submit("ls")
+    (directory_listing,) = listing_owners(listener)
+    directory_member = next(
+        member
+        for member in directory_listing.members
+        if member.displayed_basename == "beta"
+    )
+    directory_presentation = directory_listing.member_presentations[
+        directory_listing.members.index(directory_member)
+    ]
+
+    listener.submit("narrow alpha")
+    assert directory_presentation not in listener.history.presentations
+    listener.submit("widen")
+    restored = one_presentation(
+        listener, listener.types.file, directory_member.reference
+    )
+    assert restored is directory_presentation
+    assert restored.value is directory_member.reference
+
+    listener.submit("ps")
+    _, process_listing = listing_owners(listener)
+    process_member = next(
+        member for member in process_listing.members if member.reference.pid == 2
+    )
+    process_presentation = process_listing.member_presentations[
+        process_listing.members.index(process_member)
+    ]
+
+    listener.submit("only running")
+    assert process_presentation not in listener.history.presentations
+    listener.submit("widen")
+    restored = one_presentation(
+        listener, listener.types.process, process_member.reference
+    )
+    assert restored is process_presentation
+    assert restored.value is process_member.reference
+
+
+def test_directory_redisplay_uses_cached_sort_filter_and_tie_breakers(tmp_path):
+    (tmp_path / "z-file").write_text("12345")
+    (tmp_path / "a-file").write_text("12345")
+    (tmp_path / "directory").mkdir()
+    os.utime(tmp_path / "z-file", (100, 100))
+    os.utime(tmp_path / "a-file", (100, 100))
+    os.utime(tmp_path / "directory", (200, 200))
+    listener = make_listener(tmp_path)
+    listener.submit("ls")
+    (listing,) = listing_owners(listener)
+
+    assert history_text(listener) == (
+        "file       a-file",
+        "directory  directory",
+        "file       z-file",
+    )
+    listener.submit("sort size")
+    assert history_text(listener) == (
+        "file       a-file",
+        "file       z-file",
+        "directory  directory",
+    )
+    listener.submit("sort mtime")
+    assert history_text(listener) == (
+        "directory  directory",
+        "file       a-file",
+        "file       z-file",
+    )
+
+    listener.submit(f"narrow {tmp_path.name}")
+    assert listing.view.substring_filter == tmp_path.name
+    assert history_text(listener) == ("",)
+
+
+def test_process_redisplay_uses_full_cached_command_and_tie_breakers(tmp_path):
+    long_prefix = "x" * 60
+    processes = FixedProcesses(
+        records={
+            9: InspectedProcess(9, 1000, "sleeping", "same"),
+            2: InspectedProcess(2, 1000, "sleeping", "same"),
+            5: InspectedProcess(5, 1000, "running", f"{long_prefix}needle"),
+        }
+    )
+    listener = make_listener(tmp_path, processes)
+    listener.submit("ps")
+    (listing,) = listing_owners(listener)
+
+    listener.submit("sort state")
+    displayed_pids = [
+        row.text.split("  ", 1)[0]
+        for row in layout(listener.history, 10_000).rows
+    ]
+    assert displayed_pids == [
+        "5",
+        "2",
+        "9",
+    ]
+    listener.submit("sort command")
+    displayed_pids = [
+        row.text.split("  ", 1)[0]
+        for row in layout(listener.history, 10_000).rows
+    ]
+    assert displayed_pids == [
+        "2",
+        "9",
+        "5",
+    ]
+    listener.submit("narrow needle")
+    listener.submit("only running")
+    assert listing.view.substring_filter == "needle"
+    assert listing.view.kind_filter == "running"
+    assert history_text(listener) == (f"5  running  {long_prefix}needle",)
+
+
+def test_modal_narrow_binds_original_listing_and_preserves_buffer_verbatim(tmp_path):
+    (tmp_path / " alpha ").write_text("a")
+    (tmp_path / "other").write_text("b")
+    processes = FixedProcesses(
+        records={8: InspectedProcess(8, 1000, "sleeping", "newer")}
+    )
+    listener = make_listener(tmp_path, processes)
+    listener.submit("ls")
+    (directory_listing,) = listing_owners(listener)
+    rows_before = listener.history.rows
+    revision_before = listener.history.revision
+
+    listener.submit("narrow")
+
+    assert listener.pending_substring_listing is directory_listing
+    assert listener.input_text == ""
+    assert listener.pending_request is None
+    assert listener.chip is None
+    assert listener.history.rows == rows_before
+    assert listener.history.revision == revision_before
+
+    listener.submit()
+    assert listener.pending_substring_listing is directory_listing
+    assert listener.history.rows == rows_before
+
+    listener._command_ps()
+    assert listing_owners(listener)[-1] is not directory_listing
+    listener.set_input_text(" alpha ")
+    listener.submit()
+
+    assert directory_listing.view.substring_filter == " alpha "
+    assert listener.pending_substring_listing is None
+    assert listener.input_text == ""
+    assert history_text(listener)[0] == "file        alpha "
+    assert history_text(listener)[-1] == "8  sleeping  newer"
+
+
+def test_modal_narrow_cancel_and_selection_are_atomic(tmp_path):
+    target = tmp_path / "target"
+    target.write_text("data")
+    listener = make_listener(tmp_path)
+    listener.submit("ls")
+    (listing,) = listing_owners(listener)
+    presentation = one_presentation(
+        listener, listener.types.file, FileRef(str(target))
+    )
+    view_before = listing.view
+    rows_before = listener.history.rows
+
+    listener.submit("narrow")
+    assert not listener.select(presentation, "target")
+    assert listener.history.rows == rows_before
+    listener.set_input_text("discard me")
+    listener.cancel()
+
+    assert listener.pending_substring_listing is None
+    assert listener.input_text == ""
+    assert listing.view is view_before
+    assert listener.history.rows == rows_before
+    assert listener.select(presentation, "target")
+    assert history_text(listener)[-1].startswith(f"path: {target} | type: file")
+
+
+def test_modal_narrow_fails_safely_when_bound_listing_is_evicted(tmp_path):
+    (tmp_path / "target").write_text("data")
+    listener = make_listener(tmp_path, history_max_rows=1)
+    listener.submit("ls")
+    listing = listener.history.rows[0].listing_owner
+    listener.submit("narrow")
+    view_before = listing.view
+    listener._append_error("evicted.")
+    rows_before_completion = listener.history.rows
+
+    listener.set_input_text("target")
+    listener.submit()
+
+    assert listing.view is view_before
+    assert listener.history.rows == rows_before_completion
+    assert listener.pending_substring_listing is None
+    assert listener.input_text == ""
+
+
+def test_view_operations_do_not_refresh_directory_or_process_capture(tmp_path):
+    root = str(tmp_path)
+    file_path = str(tmp_path / "file")
+    filesystem = CountingFilesystem(
+        root,
+        (FilesystemEntry("file", file_path),),
+        {file_path: FakeStat(stat.S_IFREG, 3, 10.0)},
+    )
+    processes = FixedProcesses(
+        records={7: InspectedProcess(7, 1000, "sleeping", "worker needle")}
+    )
+    lookups = []
+    listener = HeadlessListener(
+        root,
+        filesystem,
+        processes,
+        username_lookup=lambda uid: lookups.append(uid) or "user",
+    )
+    listener.submit("ls")
+    directory_listing = listing_owners(listener)[0]
+    listener.submit("ps")
+    process_listing = listing_owners(listener)[1]
+    calls = (
+        tuple(filesystem.stat_calls),
+        tuple(filesystem.lstat_calls),
+        tuple(filesystem.iter_calls),
+        tuple(processes.list_uids),
+        tuple(lookups),
+    )
+
+    listener.submit("sort command")
+    listener.submit("narrow needle")
+    listener.submit("only sleeping")
+    listener.submit("widen")
+    assert listener.apply_listing_view(directory_listing, "only", "files")
+    assert listener.apply_listing_view(directory_listing, "narrow", "file")
+    assert listener.apply_listing_view(directory_listing, "sort", "size")
+    assert listener.apply_listing_view(directory_listing, "widen")
+    listener.submit("narrow")
+    listener.set_input_text("worker")
+    listener.submit()
+
+    assert process_listing.view.substring_filter == "worker"
+    assert (
+        tuple(filesystem.stat_calls),
+        tuple(filesystem.lstat_calls),
+        tuple(filesystem.iter_calls),
+        tuple(processes.list_uids),
+        tuple(lookups),
+    ) == calls

@@ -1,4 +1,4 @@
-"""Headless listener, host seams, and the six ``pbui`` commands.
+"""Headless listener, host seams, and the ten ``pbui`` commands.
 
 The module is deliberately independent of terminal UI libraries.  It owns the
 coherent application model which a later terminal adapter will render.
@@ -339,7 +339,19 @@ def _production_username_lookup(uid: int) -> str:
 class HeadlessListener:
     """One UI-independent listener model and its complete command layer."""
 
-    COMMAND_NAMES = ("ls", "ps", "show", "kill", "cd", "rm")
+    COMMAND_NAMES = (
+        "ls",
+        "ps",
+        "show",
+        "kill",
+        "cd",
+        "rm",
+        "sort",
+        "narrow",
+        "only",
+        "widen",
+    )
+    VIEW_COMMAND_NAMES = frozenset({"sort", "narrow", "only", "widen"})
 
     def __init__(
         self,
@@ -372,6 +384,9 @@ class HeadlessListener:
         self._history = PresentationHistory(history_max_rows)
         self._contexts = make_domain_drawing_contexts(self._types)
         self._state = SubstrateState()
+        self._pending_substring_listing: DirectoryListing | ProcessListing | None = (
+            None
+        )
         self._translators = TranslatorTable()
         for presentation_type in (
             self._types.file,
@@ -438,6 +453,14 @@ class HeadlessListener:
         return self._state.chip
 
     @property
+    def pending_substring_listing(
+        self,
+    ) -> DirectoryListing | ProcessListing | None:
+        """The exact listing bound to a modal textual substring accept."""
+
+        return self._pending_substring_listing
+
+    @property
     def translators(self) -> TranslatorTable:
         return self._translators
 
@@ -470,6 +493,9 @@ class HeadlessListener:
     def submit(self, line: str | None = None) -> None:
         if line is not None:
             self.set_input_text(line)
+        if self._pending_substring_listing is not None:
+            self._finish_substring_accept()
+            return
         parsed = self._split_input(self._state.input_text)
         if parsed is None:
             return
@@ -481,6 +507,9 @@ class HeadlessListener:
                 )
             finally:
                 self._clear_attempt()
+            return
+        if command_name in self.VIEW_COMMAND_NAMES:
+            self._submit_view_command(command_name, raw_argument)
             return
         if command_name == "ps" and raw_argument is not None:
             try:
@@ -575,15 +604,19 @@ class HeadlessListener:
         self._state.input_text = ""
         self._state.pending_request = None
         self._state.chip = None
+        self._pending_substring_listing = None
 
     def cancel(self) -> None:
         self._state.input_text = ""
         self._state.cancel()
+        self._pending_substring_listing = None
 
     def backspace_chip(self) -> bool:
         return self._state.backspace()
 
     def select(self, presentation: Presentation | None, label: str = "") -> bool:
+        if self._pending_substring_listing is not None:
+            return False
         if presentation is None:
             return False
         if self._state.pending_request is not None:
@@ -656,6 +689,183 @@ class HeadlessListener:
     @staticmethod
     def _owned_row(row: HistoryRow, listing: object) -> HistoryRow:
         return HistoryRow(row.fragments, row.presentations, listing)
+
+    def _newest_retained_listing(
+        self,
+    ) -> DirectoryListing | ProcessListing | None:
+        for row in reversed(self._history.rows):
+            owner = row.listing_owner
+            if type(owner) in {DirectoryListing, ProcessListing}:
+                return owner
+        return None
+
+    def _listing_is_retained(
+        self, listing: DirectoryListing | ProcessListing
+    ) -> bool:
+        return any(row.listing_owner is listing for row in self._history.rows)
+
+    def _submit_view_command(
+        self, command_name: str, raw_argument: str | None
+    ) -> None:
+        listing = self._newest_retained_listing()
+        if listing is None:
+            try:
+                self._append_error("no listing in history.")
+            finally:
+                self._clear_attempt()
+            return
+
+        if command_name == "narrow" and raw_argument is None:
+            self._begin_substring_accept(listing)
+            return
+
+        grammar_error: str | None = None
+        if command_name == "sort" and (
+            raw_argument is None
+            or any(character.isspace() for character in raw_argument)
+        ):
+            grammar_error = "sort requires one key."
+        elif command_name == "only" and (
+            raw_argument is None
+            or any(character.isspace() for character in raw_argument)
+        ):
+            grammar_error = "only requires one word."
+        elif command_name == "widen" and raw_argument is not None:
+            grammar_error = "widen does not take an argument."
+
+        if grammar_error is not None:
+            try:
+                self._append_error(grammar_error)
+            finally:
+                self._clear_attempt()
+            return
+
+        try:
+            self.apply_listing_view(listing, command_name, raw_argument)
+        finally:
+            self._clear_attempt()
+
+    def _begin_substring_accept(
+        self, listing: DirectoryListing | ProcessListing
+    ) -> None:
+        self._clear_attempt()
+        self._pending_substring_listing = listing
+
+    def _finish_substring_accept(self) -> bool:
+        listing = self._pending_substring_listing
+        if listing is None:
+            return False
+        substring = self._state.input_text
+        if not substring:
+            return False
+        try:
+            return self.apply_listing_view(listing, "narrow", substring)
+        finally:
+            self._clear_attempt()
+
+    def apply_listing_view(
+        self,
+        listing: DirectoryListing | ProcessListing,
+        operation: str,
+        argument: str | None = None,
+    ) -> bool:
+        """Apply one view operation to an exact retained listing and redisplay it."""
+
+        if type(listing) not in {DirectoryListing, ProcessListing}:
+            raise TypeError(
+                "listing must be exactly DirectoryListing or ProcessListing"
+            )
+        if operation not in self.VIEW_COMMAND_NAMES:
+            raise ValueError(f"unknown listing view operation {operation!r}")
+        if not self._listing_is_retained(listing):
+            return False
+
+        if operation == "sort":
+            if type(argument) is not str or not argument:
+                raise ValueError("sort requires a nonempty string argument")
+            try:
+                listing.replace_sort_key(argument)
+            except ValueError:
+                kind = "directory" if type(listing) is DirectoryListing else "process"
+                self._append_error(
+                    f"cannot sort this {kind} listing by {escape_display(argument)}."
+                )
+                return False
+        elif operation == "narrow":
+            if type(argument) is not str or not argument:
+                raise ValueError("narrow requires a nonempty string argument")
+            listing.replace_substring_filter(argument)
+        elif operation == "only":
+            if type(argument) is not str or not argument:
+                raise ValueError("only requires a nonempty string argument")
+            try:
+                listing.replace_kind_filter(argument)
+            except ValueError:
+                kind = "directory" if type(listing) is DirectoryListing else "process"
+                self._append_error(
+                    "cannot apply only "
+                    f"{escape_display(argument)} to this {kind} listing."
+                )
+                return False
+        else:
+            if argument is not None:
+                raise ValueError("widen does not accept an argument")
+            listing.widen()
+
+        self._history.replace_listing_rows(listing, self._listing_rows(listing))
+        return True
+
+    def _listing_rows(
+        self, listing: DirectoryListing | ProcessListing
+    ) -> tuple[HistoryRow, ...]:
+        presentations_by_member = {
+            id(member): presentation
+            for member, presentation in zip(
+                listing.members, listing.member_presentations, strict=True
+            )
+        }
+        visible_members = listing.visible_members()
+        if not visible_members:
+            if (
+                type(listing) is DirectoryListing
+                and not listing.members
+                and listing.view.substring_filter is None
+                and listing.view.kind_filter is None
+            ):
+                row = self._contexts.standalone.present_row(
+                    format_empty_directory(listing.directory), self._types.text
+                )
+                return (self._owned_row(row, listing),)
+            return (HistoryRow((LiteralFragment(""),), (), listing),)
+
+        rows: list[HistoryRow] = []
+        for member in visible_members:
+            presentation = presentations_by_member[id(member)]
+            if type(listing) is DirectoryListing:
+                prefix = (
+                    "directory  "
+                    if type(member.reference) is DirectoryRef
+                    else "file       "
+                )
+                displayed = PresentedFragment(
+                    presentation.id,
+                    (LiteralFragment(member.displayed_basename),),
+                )
+                row = self._contexts.listing.row(prefix, displayed)
+            else:
+                displayed = PresentedFragment(
+                    presentation.id,
+                    (LiteralFragment(str(member.reference.pid)),),
+                )
+                row = self._contexts.listing.row(
+                    displayed,
+                    "  ",
+                    member.state,
+                    "  ",
+                    member.command,
+                )
+            rows.append(self._owned_row(row, listing))
+        return tuple(rows)
 
     def _allocate_directory_presentations(
         self, listing: DirectoryListing
