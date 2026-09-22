@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from pbui.substrate import PresentationType, PresentationTypeRegistry
+from pbui.substrate import Presentation, PresentationType, PresentationTypeRegistry
 from pbui.text import DrawingContext, HistoryRow
 
 
@@ -198,7 +198,13 @@ def _validate_view(
 class DirectoryListing:
     """One stable captured directory listing with replaceable pure view state."""
 
-    __slots__ = ("_directory", "_members", "_view")
+    __slots__ = (
+        "_directory",
+        "_header_presentation",
+        "_member_presentations",
+        "_members",
+        "_view",
+    )
 
     def __init__(
         self,
@@ -215,6 +221,8 @@ class DirectoryListing:
         self._directory = directory
         self._members = captured
         self._view = self._validated_view(initial_view)
+        self._header_presentation: Presentation | None = None
+        self._member_presentations: tuple[Presentation, ...] = ()
 
     @staticmethod
     def _validated_view(view: object) -> ListingView:
@@ -235,6 +243,38 @@ class DirectoryListing:
     @property
     def view(self) -> ListingView:
         return self._view
+
+    @property
+    def header_presentation(self) -> Presentation | None:
+        return self._header_presentation
+
+    @property
+    def member_presentations(self) -> tuple[Presentation, ...]:
+        return self._member_presentations
+
+    def bind_presentations(
+        self,
+        header: Presentation,
+        members: Iterable[Presentation],
+        types: DomainTypes,
+    ) -> None:
+        """Bind the stable owned presentations once, after full validation."""
+
+        if self._header_presentation is not None:
+            raise ValueError("listing presentations are already bound")
+        if type(types) is not DomainTypes:
+            raise TypeError("types must be exactly DomainTypes")
+        captured = tuple(members)
+        _validate_presentation_binding(
+            self,
+            self._members,
+            header,
+            captured,
+            types,
+            listing_type=types.directory_listing,
+        )
+        self._header_presentation = header
+        self._member_presentations = captured
 
     def replace_sort_key(self, sort_key: str) -> None:
         candidate = ListingView(
@@ -293,7 +333,12 @@ class DirectoryListing:
 class ProcessListing:
     """One stable captured process listing with replaceable pure view state."""
 
-    __slots__ = ("_members", "_view")
+    __slots__ = (
+        "_header_presentation",
+        "_member_presentations",
+        "_members",
+        "_view",
+    )
 
     def __init__(
         self,
@@ -306,6 +351,8 @@ class ProcessListing:
         initial_view = ListingView("pid") if view is None else view
         self._members = captured
         self._view = self._validated_view(initial_view)
+        self._header_presentation: Presentation | None = None
+        self._member_presentations: tuple[Presentation, ...] = ()
 
     @staticmethod
     def _validated_view(view: object) -> ListingView:
@@ -322,6 +369,38 @@ class ProcessListing:
     @property
     def view(self) -> ListingView:
         return self._view
+
+    @property
+    def header_presentation(self) -> Presentation | None:
+        return self._header_presentation
+
+    @property
+    def member_presentations(self) -> tuple[Presentation, ...]:
+        return self._member_presentations
+
+    def bind_presentations(
+        self,
+        header: Presentation,
+        members: Iterable[Presentation],
+        types: DomainTypes,
+    ) -> None:
+        """Bind the stable owned presentations once, after full validation."""
+
+        if self._header_presentation is not None:
+            raise ValueError("listing presentations are already bound")
+        if type(types) is not DomainTypes:
+            raise TypeError("types must be exactly DomainTypes")
+        captured = tuple(members)
+        _validate_presentation_binding(
+            self,
+            self._members,
+            header,
+            captured,
+            types,
+            listing_type=types.process_listing,
+        )
+        self._header_presentation = header
+        self._member_presentations = captured
 
     def replace_sort_key(self, sort_key: str) -> None:
         candidate = ListingView(
@@ -362,6 +441,51 @@ class ProcessListing:
         else:
             key = lambda member: (member.command, member.reference.pid)
         return tuple(sorted(members, key=key))
+
+
+def _validate_presentation_binding(
+    listing: DirectoryListing | ProcessListing,
+    listing_members: tuple[DirectoryListingMember | ProcessListingMember, ...],
+    header: Presentation,
+    member_presentations: tuple[Presentation, ...],
+    types: DomainTypes,
+    *,
+    listing_type: PresentationType,
+) -> None:
+    if type(types) is not DomainTypes:
+        raise TypeError("types must be exactly DomainTypes")
+    if type(header) is not Presentation:
+        raise TypeError("header must be exactly Presentation")
+    if header.presentation_type is not listing_type or header.value is not listing:
+        raise ValueError("header presentation has the wrong type or value")
+    if len(member_presentations) != len(listing_members):
+        raise ValueError("member presentation count does not match captured members")
+
+    for member, presentation in zip(
+        listing_members, member_presentations, strict=True
+    ):
+        if type(presentation) is not Presentation:
+            raise TypeError("members must contain only Presentation values")
+        reference = member.reference
+        if type(reference) is FileRef:
+            expected_type = types.file
+        elif type(reference) is DirectoryRef:
+            expected_type = types.directory
+        elif type(reference) is ProcessRef:
+            expected_type = types.process
+        else:
+            raise AssertionError("validated listing member has an unknown reference")
+        if (
+            presentation.presentation_type is not expected_type
+            or presentation.value is not reference
+        ):
+            raise ValueError("member presentation has the wrong order, type, or value")
+
+    presentation_ids = (header.id,) + tuple(
+        presentation.id for presentation in member_presentations
+    )
+    if len(set(presentation_ids)) != len(presentation_ids):
+        raise ValueError("owned presentation ids must be unique")
 
 
 ListingValue = DirectoryListing | ProcessListing
@@ -591,7 +715,7 @@ def register_domain_drawers(
     *,
     path_mode: str,
 ) -> DrawingContext:
-    """Install all five drawers into ``context`` for one explicit path mode."""
+    """Install all seven domain drawers for one explicit path mode."""
 
     if path_mode not in {"standalone", "listing"}:
         raise ValueError("path mode must be 'standalone' or 'listing'")
@@ -620,11 +744,21 @@ def register_domain_drawers(
         _expect_exact(value, str, "Error")
         return f"Error: {value}"
 
+    def draw_directory_listing(value: Any, _context: DrawingContext) -> str:
+        _expect_exact(value, DirectoryListing, "DirectoryListing")
+        return ""
+
+    def draw_process_listing(value: Any, _context: DrawingContext) -> str:
+        _expect_exact(value, ProcessListing, "ProcessListing")
+        return ""
+
     context.register_drawer(types.file, draw_file)
     context.register_drawer(types.directory, draw_directory)
     context.register_drawer(types.process, draw_process)
     context.register_drawer(types.text, draw_text)
     context.register_drawer(types.error, draw_error)
+    context.register_drawer(types.directory_listing, draw_directory_listing)
+    context.register_drawer(types.process_listing, draw_process_listing)
     return context
 
 

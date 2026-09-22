@@ -776,3 +776,165 @@ def test_listing_view_operations_never_revisit_host_or_escape_functions(monkeypa
         process.visible_members()
         process.widen()
         process.visible_members()
+
+
+def presentation_for(context, value, presentation_type):
+    fragment = context.present(value, presentation_type)
+    return context.presentation(fragment.presentation_id)
+
+
+def test_pure_listings_start_unbound_and_binding_preserves_stable_identity(
+    domain_types,
+):
+    directory = DirectoryListing(DirectoryRef("/items"), directory_listing_members())
+    process = ProcessListing(process_listing_members())
+
+    assert directory.header_presentation is None
+    assert directory.member_presentations == ()
+    assert process.header_presentation is None
+    assert process.member_presentations == ()
+
+    contexts = make_domain_drawing_contexts(domain_types)
+    directory_header = presentation_for(
+        contexts.listing, directory, domain_types.directory_listing
+    )
+    directory_presentations = tuple(
+        presentation_for(
+            contexts.listing,
+            member.reference,
+            domain_types.file
+            if type(member.reference) is FileRef
+            else domain_types.directory,
+        )
+        for member in directory.members
+    )
+    process_header = presentation_for(
+        contexts.listing, process, domain_types.process_listing
+    )
+    process_presentations = tuple(
+        presentation_for(contexts.listing, member.reference, domain_types.process)
+        for member in process.members
+    )
+
+    directory.bind_presentations(
+        directory_header, directory_presentations, domain_types
+    )
+    process.bind_presentations(process_header, process_presentations, domain_types)
+
+    assert directory.header_presentation is directory_header
+    assert directory.member_presentations is directory_presentations
+    assert process.header_presentation is process_header
+    assert process.member_presentations is process_presentations
+    assert directory_header.value is directory
+    assert process_header.value is process
+    assert [item.value for item in directory_presentations] == [
+        member.reference for member in directory.members
+    ]
+    assert [item.value for item in process_presentations] == [
+        member.reference for member in process.members
+    ]
+    assert len(
+        {
+            directory_header.id,
+            *(item.id for item in directory_presentations),
+        }
+    ) == 1 + len(directory_presentations)
+    assert len(
+        {process_header.id, *(item.id for item in process_presentations)}
+    ) == 1 + len(process_presentations)
+
+    owned_before = (
+        directory.header_presentation,
+        directory.member_presentations,
+        process.header_presentation,
+        process.member_presentations,
+    )
+    directory.replace_sort_key("mtime")
+    directory.replace_kind_filter("files")
+    process.replace_sort_key("command")
+    process.replace_kind_filter("running")
+    assert (
+        directory.header_presentation,
+        directory.member_presentations,
+        process.header_presentation,
+        process.member_presentations,
+    ) == owned_before
+
+    with pytest.raises(ValueError, match="already bound"):
+        directory.bind_presentations(
+            directory_header, directory_presentations, domain_types
+        )
+
+
+def test_listing_binding_rejects_invalid_owned_sets_atomically(domain_types):
+    context = make_domain_drawing_contexts(domain_types).listing
+
+    def fresh_directory():
+        references = (FileRef("/one"), DirectoryRef("/two"))
+        listing = DirectoryListing(
+            DirectoryRef("/"),
+            (
+                DirectoryListingMember(references[0], "one", 1, 10),
+                DirectoryListingMember(references[1], "two", None, 20),
+            ),
+        )
+        header = presentation_for(context, listing, domain_types.directory_listing)
+        valid = (
+            presentation_for(context, references[0], domain_types.file),
+            presentation_for(context, references[1], domain_types.directory),
+        )
+        return listing, header, valid
+
+    invalid_bindings = []
+    listing, header, valid = fresh_directory()
+    invalid_bindings.append((listing, header, valid[:1]))
+    listing, header, valid = fresh_directory()
+    invalid_bindings.append((listing, header, tuple(reversed(valid))))
+    listing, header, valid = fresh_directory()
+    wrong_value = presentation_for(context, FileRef("/other"), domain_types.file)
+    invalid_bindings.append((listing, header, (wrong_value, valid[1])))
+    listing, header, valid = fresh_directory()
+    wrong_type = presentation_for(
+        context, listing.members[0].reference, domain_types.file
+    )
+    wrong_type.presentation_type = domain_types.directory
+    invalid_bindings.append((listing, header, (wrong_type, valid[1])))
+
+    for listing, header, members in invalid_bindings:
+        with pytest.raises(ValueError):
+            listing.bind_presentations(header, members, domain_types)
+        assert listing.header_presentation is None
+        assert listing.member_presentations == ()
+
+    shared_reference = ProcessRef(7)
+    duplicate_listing = ProcessListing(
+        (
+            ProcessListingMember(
+                shared_reference, "running", 1, "user", "first"
+            ),
+            ProcessListingMember(
+                shared_reference, "sleeping", 1, "user", "second"
+            ),
+        )
+    )
+    duplicate_header = presentation_for(
+        context, duplicate_listing, domain_types.process_listing
+    )
+    duplicate_member = presentation_for(
+        context, shared_reference, domain_types.process
+    )
+    with pytest.raises(ValueError, match="ids must be unique"):
+        duplicate_listing.bind_presentations(
+            duplicate_header,
+            (duplicate_member, duplicate_member),
+            domain_types,
+        )
+    assert duplicate_listing.header_presentation is None
+    assert duplicate_listing.member_presentations == ()
+
+    listing, wrong_header, valid = fresh_directory()
+    wrong_header.presentation_type = domain_types.process_listing
+    with pytest.raises(ValueError, match="header presentation"):
+        listing.bind_presentations(wrong_header, valid, domain_types)
+    assert listing.header_presentation is None
+    assert listing.member_presentations == ()

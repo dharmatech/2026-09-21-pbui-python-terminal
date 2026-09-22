@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import errno
 import os
+import pwd
 import signal
 import stat as stat_module
 import sys
@@ -16,11 +17,15 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from pbui.domain import (
+    DirectoryListing,
+    DirectoryListingMember,
     DirectoryRef,
     DomainDrawingContexts,
     DomainParseError,
     DomainTypes,
     FileRef,
+    ProcessListing,
+    ProcessListingMember,
     ProcessRef,
     TypedDomainValue,
     compose_failure_message,
@@ -35,9 +40,6 @@ from pbui.domain import (
     parse_file,
     parse_process,
     parse_show,
-    path_listing_row,
-    path_sort_key,
-    process_listing_row,
     register_domain_types,
 )
 from pbui.substrate import (
@@ -50,6 +52,7 @@ from pbui.substrate import (
     SubstrateState,
     TranslatorTable,
 )
+from pbui.text import HistoryRow, LiteralFragment, PresentedFragment
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +332,10 @@ class LinuxProcessService:
 _ABSENT_OR_UNRESOLVED = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
 
 
+def _production_username_lookup(uid: int) -> str:
+    return pwd.getpwuid(uid).pw_name
+
+
 class HeadlessListener:
     """One UI-independent listener model and its complete command layer."""
 
@@ -341,6 +348,7 @@ class HeadlessListener:
         processes: ProcessService,
         *,
         history_max_rows: int = PresentationHistory.MAX_LOGICAL_ROWS,
+        username_lookup: Callable[[int], object] | None = None,
     ) -> None:
         normalized_cwd = filesystem.abspath(starting_cwd)
         cwd_stat = filesystem.stat(normalized_cwd)
@@ -351,6 +359,13 @@ class HeadlessListener:
 
         self._filesystem = filesystem
         self._processes = processes
+        self._username_lookup = (
+            _production_username_lookup
+            if username_lookup is None
+            else username_lookup
+        )
+        if not callable(self._username_lookup):
+            raise TypeError("username lookup must be callable")
         self._cwd = normalized_cwd
         self._registry = PresentationTypeRegistry()
         self._types = register_domain_types(self._registry)
@@ -638,56 +653,163 @@ class HeadlessListener:
             raise NotADirectoryError("Not a directory")
         return result
 
+    @staticmethod
+    def _owned_row(row: HistoryRow, listing: object) -> HistoryRow:
+        return HistoryRow(row.fragments, row.presentations, listing)
+
+    def _allocate_directory_presentations(
+        self, listing: DirectoryListing
+    ) -> tuple[PresentedFragment, ...]:
+        context = self._contexts.listing
+        header_fragment = context.present(listing, self._types.directory_listing)
+        header = context.presentation(header_fragment.presentation_id)
+        fragments: list[PresentedFragment] = []
+        presentations: list[Presentation] = []
+        for member in listing.members:
+            presentation_type = (
+                self._types.directory
+                if type(member.reference) is DirectoryRef
+                else self._types.file
+            )
+            fragment = context.present(member.reference, presentation_type)
+            fragments.append(fragment)
+            presentations.append(context.presentation(fragment.presentation_id))
+        listing.bind_presentations(header, presentations, self._types)
+        return tuple(fragments)
+
+    def _allocate_process_presentations(
+        self, listing: ProcessListing
+    ) -> tuple[PresentedFragment, ...]:
+        context = self._contexts.listing
+        header_fragment = context.present(listing, self._types.process_listing)
+        header = context.presentation(header_fragment.presentation_id)
+        fragments: list[PresentedFragment] = []
+        presentations: list[Presentation] = []
+        for member in listing.members:
+            fragment = context.present(member.reference, self._types.process)
+            fragments.append(fragment)
+            presentations.append(context.presentation(fragment.presentation_id))
+        listing.bind_presentations(header, presentations, self._types)
+        return tuple(fragments)
+
     def _command_ls(self, value: object | None) -> None:
         if type(value) is not DirectoryRef:
             raise TypeError("ls requires DirectoryRef")
         try:
             self._require_directory(value)
-            children: list[TypedDomainValue] = []
+            captured_members: list[DirectoryListingMember] = []
             for entry in self._filesystem.iter_directory(value.path):
                 if entry.name in {".", ".."}:
                     continue
                 child_path = self._filesystem.abspath(entry.path)
-                children.append(self._classify_current(child_path))
-            children.sort(key=lambda item: path_sort_key(item.value))
+                try:
+                    metadata = self._filesystem.stat(child_path)
+                except OSError as stat_error:
+                    if stat_error.errno not in _ABSENT_OR_UNRESOLVED:
+                        raise
+                    unlinked = self._filesystem.lstat(child_path)
+                    if not stat_module.S_ISLNK(unlinked.st_mode):
+                        raise stat_error
+                    reference: FileRef | DirectoryRef = FileRef(child_path)
+                    size: int | None = int(unlinked.st_size)
+                    metadata = unlinked
+                else:
+                    if stat_module.S_ISDIR(metadata.st_mode):
+                        reference = DirectoryRef(child_path)
+                        size = None
+                    else:
+                        reference = FileRef(child_path)
+                        size = int(metadata.st_size)
+                captured_members.append(
+                    DirectoryListingMember(
+                        reference,
+                        escape_display(entry.name),
+                        size,
+                        int(round(metadata.st_mtime)),
+                    )
+                )
         except OSError as error:
             self._append_host_error("cannot list", value.path, error)
             return
 
-        if not children:
-            self._append_text(format_empty_directory(value))
-            return
-        for item in children:
-            self._history.append(
-                path_listing_row(item, self._types, self._contexts.listing)
+        listing = DirectoryListing(value, captured_members)
+        member_fragments = self._allocate_directory_presentations(listing)
+        if not listing.members:
+            row = self._contexts.standalone.present_row(
+                format_empty_directory(value), self._types.text
             )
+            self._history.append(self._owned_row(row, listing))
+            return
+        fragments_by_member = {
+            id(member): fragment
+            for member, fragment in zip(
+                listing.members, member_fragments, strict=True
+            )
+        }
+        for member in listing.visible_members():
+            prefix = (
+                "directory  "
+                if type(member.reference) is DirectoryRef
+                else "file       "
+            )
+            allocated = fragments_by_member[id(member)]
+            displayed = PresentedFragment(
+                allocated.presentation_id,
+                (LiteralFragment(member.displayed_basename),),
+            )
+            row = self._contexts.listing.row(prefix, displayed)
+            self._history.append(self._owned_row(row, listing))
 
     def _command_ps(self) -> None:
         try:
-            records = sorted(
-                (
-                    record
-                    for record in self._processes.list_for_uid(
-                        self._processes.own_uid
+            own_uid = self._processes.own_uid
+            captured_members: list[ProcessListingMember] = []
+            for record in self._processes.list_for_uid(own_uid):
+                if record.real_uid != own_uid:
+                    continue
+                try:
+                    username = self._username_lookup(record.real_uid)
+                except (KeyError, OSError):
+                    username = None
+                displayed_user = (
+                    username if isinstance(username, str) else str(record.real_uid)
+                )
+                captured_members.append(
+                    ProcessListingMember(
+                        ProcessRef(record.pid),
+                        record.state,
+                        record.real_uid,
+                        escape_display(displayed_user),
+                        escape_display(record.command),
                     )
-                    if record.real_uid == self._processes.own_uid
-                ),
-                key=lambda record: record.pid,
-            )
+                )
         except OSError as error:
             message = f"cannot list processes: {escape_display(str(error))}"
             self._append_error(message if message.endswith(".") else f"{message}.")
             return
-        for record in records:
+
+        listing = ProcessListing(captured_members)
+        member_fragments = self._allocate_process_presentations(listing)
+        if not listing.members:
             self._history.append(
-                process_listing_row(
-                    ProcessRef(record.pid),
-                    record.state,
-                    record.command,
-                    self._types,
-                    self._contexts.listing,
-                )
+                HistoryRow((LiteralFragment(""),), (), listing)
             )
+            return
+        fragments_by_member = {
+            id(member): fragment
+            for member, fragment in zip(
+                listing.members, member_fragments, strict=True
+            )
+        }
+        for member in listing.visible_members():
+            row = self._contexts.listing.row(
+                fragments_by_member[id(member)],
+                "  ",
+                member.state,
+                "  ",
+                member.command,
+            )
+            self._history.append(self._owned_row(row, listing))
 
     def _command_show(self, value: object | None) -> None:
         if type(value) is ProcessRef:

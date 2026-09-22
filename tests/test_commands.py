@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import signal
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -9,6 +10,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from pbui.commands import (
+    FilesystemEntry,
     HeadlessListener,
     InspectedProcess,
     LinuxProcessService,
@@ -16,9 +18,16 @@ from pbui.commands import (
     RootedFilesystem,
     process_state_word,
 )
-from pbui.domain import DirectoryRef, FileRef, ProcessRef
+from pbui.domain import (
+    DirectoryListing,
+    DirectoryRef,
+    FileRef,
+    ProcessListing,
+    ProcessRef,
+    escape_display,
+)
 from pbui.substrate import Chip
-from pbui.text import layout
+from pbui.text import LiteralFragment, layout
 
 
 @dataclass
@@ -28,9 +37,10 @@ class FixedProcesses:
     records: dict[int, InspectedProcess] = field(default_factory=dict)
     sent: list[tuple[int, signal.Signals]] = field(default_factory=list)
     signal_failures: set[int] = field(default_factory=set)
+    list_uids: list[int] = field(default_factory=list)
 
     def list_for_uid(self, uid):
-        del uid
+        self.list_uids.append(uid)
         return tuple(self.records.values())
 
     def inspect(self, pid):
@@ -47,8 +57,13 @@ class FixedProcesses:
 
 def make_listener(tmp_path, processes=None, **kwargs):
     service = processes if processes is not None else FixedProcesses()
+    username_lookup = kwargs.pop("username_lookup", lambda uid: str(uid))
     return HeadlessListener(
-        str(tmp_path), RootedFilesystem(tmp_path), service, **kwargs
+        str(tmp_path),
+        RootedFilesystem(tmp_path),
+        service,
+        username_lookup=username_lookup,
+        **kwargs,
     )
 
 
@@ -65,6 +80,15 @@ def one_presentation(listener, presentation_type, value=None):
     ]
     assert len(matches) == 1
     return matches[0]
+
+
+def listing_owners(listener):
+    owners = []
+    for row in listener.history.rows:
+        owner = row.listing_owner
+        if owner is not None and not any(owner is retained for retained in owners):
+            owners.append(owner)
+    return tuple(owners)
 
 
 def write_process(proc_root, pid, *, name="worker", uid=1000, state="S", cmdline=b""):
@@ -612,3 +636,394 @@ def test_production_send_sigterm_reaches_only_its_created_child(tmp_path):
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait(timeout=2)
+
+
+@dataclass(frozen=True)
+class FakeStat:
+    st_mode: int
+    st_size: int
+    st_mtime: float
+
+
+class CountingFilesystem:
+    def __init__(self, root, entries, followed, unlinked=None):
+        self.root = os.path.abspath(root)
+        self.entries = tuple(entries)
+        self.followed = dict(followed)
+        self.unlinked = {} if unlinked is None else dict(unlinked)
+        self.stat_calls = []
+        self.lstat_calls = []
+        self.iter_calls = []
+
+    @staticmethod
+    def _result(value):
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    def abspath(self, path):
+        return os.path.abspath(path)
+
+    def stat(self, path):
+        path = os.path.abspath(path)
+        self.stat_calls.append(path)
+        if path == self.root:
+            return FakeStat(stat.S_IFDIR, 0, 0.0)
+        return self._result(self.followed[path])
+
+    def lstat(self, path):
+        path = os.path.abspath(path)
+        self.lstat_calls.append(path)
+        return self._result(self.unlinked[path])
+
+    def readlink(self, path):
+        raise AssertionError(f"unexpected readlink: {path}")
+
+    def iter_directory(self, path):
+        path = os.path.abspath(path)
+        self.iter_calls.append(path)
+        return self.entries
+
+    def unlink(self, path):
+        raise AssertionError(f"unexpected unlink: {path}")
+
+
+def test_ls_captures_metadata_and_stable_presentations_once_then_refreshes(tmp_path):
+    dotfile = tmp_path / ".dot"
+    dotfile.write_text("dot")
+    target_file = tmp_path / "target-file"
+    target_file.write_text("target")
+    target_directory = tmp_path / "target-directory"
+    target_directory.mkdir()
+    file_link = tmp_path / "file-link"
+    file_link.symlink_to(target_file.name)
+    directory_link = tmp_path / "directory-link"
+    directory_link.symlink_to(target_directory.name, target_is_directory=True)
+    broken_link = tmp_path / "broken-link"
+    broken_link.symlink_to("missing")
+    os.utime(target_file, (101.4, 101.4))
+    os.utime(target_directory, (202.6, 202.6))
+    os.utime(broken_link, (303.4, 303.4), follow_symlinks=False)
+    expected_stats = {
+        ".dot": os.stat(dotfile),
+        "target-file": os.stat(target_file),
+        "target-directory": os.stat(target_directory),
+        "file-link": os.stat(file_link),
+        "directory-link": os.stat(directory_link),
+        "broken-link": os.lstat(broken_link),
+    }
+    listener = make_listener(tmp_path)
+
+    listener.submit("ls")
+
+    (listing,) = listing_owners(listener)
+    assert type(listing) is DirectoryListing
+    assert listing.directory == DirectoryRef(str(tmp_path))
+    assert all(row.listing_owner is listing for row in listener.history.rows)
+    assert listing.header_presentation.type is listener.types.directory_listing
+    assert listing.header_presentation.value is listing
+    assert listing.header_presentation not in listener.history.presentations
+    assert len(listing.member_presentations) == len(listing.members) == 6
+
+    members = {member.displayed_basename: member for member in listing.members}
+    assert set(members) == set(expected_stats)
+    for name, member in members.items():
+        assert member.reference.path == str(tmp_path / name)
+        assert member.displayed_basename == escape_display(name)
+        assert member.mtime == int(round(expected_stats[name].st_mtime))
+    assert members["target-file"].size == expected_stats["target-file"].st_size
+    assert members["file-link"].size == expected_stats["file-link"].st_size
+    assert members["broken-link"].size == expected_stats["broken-link"].st_size
+    assert members["target-directory"].size is None
+    assert members["directory-link"].size is None
+    assert type(members["target-directory"].reference) is DirectoryRef
+    assert type(members["directory-link"].reference) is DirectoryRef
+    assert type(members["file-link"].reference) is FileRef
+    assert type(members["broken-link"].reference) is FileRef
+
+    for member, presentation in zip(
+        listing.members, listing.member_presentations, strict=True
+    ):
+        assert presentation.value is member.reference
+        expected_type = (
+            listener.types.directory
+            if type(member.reference) is DirectoryRef
+            else listener.types.file
+        )
+        assert presentation.type is expected_type
+    assert {row.presentations[0] for row in listener.history.rows} == set(
+        listing.member_presentations
+    )
+    assert history_text(listener) == tuple(
+        (
+            "directory  "
+            if type(member.reference) is DirectoryRef
+            else "file       "
+        )
+        + member.displayed_basename
+        for member in listing.visible_members()
+    )
+
+    captured_snapshot = tuple(
+        (member.reference, member.displayed_basename, member.size, member.mtime)
+        for member in listing.members
+    )
+    target_file.write_text("a much longer replacement")
+    (tmp_path / "new-file").write_text("new")
+    assert tuple(
+        (member.reference, member.displayed_basename, member.size, member.mtime)
+        for member in listing.members
+    ) == captured_snapshot
+    assert tuple(listing.visible_members()) == tuple(
+        sorted(listing.members, key=lambda member: member.displayed_basename)
+    )
+
+    listener.submit("ls")
+    first, second = listing_owners(listener)
+    assert first is listing
+    assert second is not first
+    assert "new-file" in {
+        member.displayed_basename for member in second.members
+    }
+    assert next(
+        member for member in second.members if member.displayed_basename == "target-file"
+    ).size == len("a much longer replacement")
+
+
+def test_ls_omits_only_dot_entries_and_does_not_repeat_member_metadata_reads(tmp_path):
+    root = str(tmp_path)
+    file_path = str(tmp_path / ".hidden")
+    directory_path = str(tmp_path / "directory")
+    entries = (
+        FilesystemEntry(".", str(tmp_path / ".")),
+        FilesystemEntry("..", str(tmp_path / "..")),
+        FilesystemEntry(".hidden", file_path),
+        FilesystemEntry("directory", directory_path),
+    )
+    filesystem = CountingFilesystem(
+        root,
+        entries,
+        {
+            file_path: FakeStat(stat.S_IFREG, 17, 10.6),
+            directory_path: FakeStat(stat.S_IFDIR, 999, 20.4),
+        },
+    )
+    listener = HeadlessListener(
+        root,
+        filesystem,
+        FixedProcesses(),
+        username_lookup=lambda uid: str(uid),
+    )
+
+    listener.submit("ls")
+
+    (listing,) = listing_owners(listener)
+    assert [member.displayed_basename for member in listing.members] == [
+        ".hidden",
+        "directory",
+    ]
+    assert filesystem.iter_calls == [root]
+    assert filesystem.stat_calls.count(file_path) == 1
+    assert filesystem.stat_calls.count(directory_path) == 1
+    assert filesystem.lstat_calls == []
+
+
+def test_ls_mid_capture_failure_appends_only_error_and_no_owned_rows(tmp_path):
+    root = str(tmp_path)
+    first = str(tmp_path / "first")
+    denied = str(tmp_path / "denied")
+    filesystem = CountingFilesystem(
+        root,
+        (FilesystemEntry("first", first), FilesystemEntry("denied", denied)),
+        {
+            first: FakeStat(stat.S_IFREG, 1, 1.0),
+            denied: PermissionError(13, "denied", denied),
+        },
+    )
+    listener = HeadlessListener(
+        root,
+        filesystem,
+        FixedProcesses(),
+        username_lookup=lambda uid: str(uid),
+    )
+
+    listener.submit("ls")
+
+    assert filesystem.stat_calls.count(first) == 1
+    assert history_text(listener) == (
+        f"Error: cannot list {root}: [Errno 13] denied: '{denied}'.",
+    )
+    assert listener.history.rows[0].listing_owner is None
+    assert listing_owners(listener) == ()
+    assert all(
+        presentation.type is listener.types.error
+        for presentation in listener.history.presentations
+    )
+
+
+def test_empty_ls_and_ps_retain_bound_listing_targets(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    listener = make_listener(tmp_path)
+
+    listener.submit("ls empty")
+    directory_listing = listener.history.rows[0].listing_owner
+    assert type(directory_listing) is DirectoryListing
+    assert directory_listing.members == ()
+    assert directory_listing.member_presentations == ()
+    assert directory_listing.header_presentation.value is directory_listing
+    assert history_text(listener) == (f"Directory is empty: {empty}",)
+
+    listener.submit("ps")
+    process_row = listener.history.rows[-1]
+    process_listing = process_row.listing_owner
+    assert type(process_listing) is ProcessListing
+    assert process_listing.members == ()
+    assert process_listing.member_presentations == ()
+    assert process_listing.header_presentation.value is process_listing
+    assert process_row.fragments == (LiteralFragment(""),)
+    assert process_row.presentations == ()
+    assert history_text(listener)[-1] == ""
+
+
+def test_ps_captures_filtered_cached_members_and_owned_presentations(tmp_path):
+    processes = FixedProcesses(
+        records={
+            700: InspectedProcess(700, 1000, "running", "pbui\nfull\\command"),
+            2: InspectedProcess(2, 1000, "sleeping", "two\targs"),
+            1: InspectedProcess(1, 2000, "idle", "foreign"),
+        }
+    )
+    lookups = []
+
+    def username_lookup(uid):
+        lookups.append(uid)
+        return "ali\nce"
+
+    listener = make_listener(
+        tmp_path, processes, username_lookup=username_lookup
+    )
+
+    listener.submit("ps")
+
+    (listing,) = listing_owners(listener)
+    assert type(listing) is ProcessListing
+    assert processes.list_uids == [1000]
+    assert lookups == [1000, 1000]
+    assert [member.reference.pid for member in listing.members] == [700, 2]
+    assert [member.reference.pid for member in listing.visible_members()] == [2, 700]
+    assert [member.uid for member in listing.members] == [1000, 1000]
+    assert [member.displayed_user for member in listing.members] == [
+        r"ali\nce",
+        r"ali\nce",
+    ]
+    assert [member.command for member in listing.members] == [
+        r"pbui\nfull\\command",
+        r"two\targs",
+    ]
+    assert history_text(listener) == (
+        r"2  sleeping  two\targs",
+        r"700  running  pbui\nfull\\command",
+    )
+    assert all(row.listing_owner is listing for row in listener.history.rows)
+    assert listing.header_presentation.type is listener.types.process_listing
+    assert listing.header_presentation.value is listing
+    assert listing.header_presentation not in listener.history.presentations
+    assert len(listing.member_presentations) == 2
+    for member, presentation in zip(
+        listing.members, listing.member_presentations, strict=True
+    ):
+        assert presentation.type is listener.types.process
+        assert presentation.value is member.reference
+    assert {row.presentations[0] for row in listener.history.rows} == set(
+        listing.member_presentations
+    )
+
+
+def test_ps_username_failures_fall_back_to_decimal_uid(tmp_path):
+    def missing(_uid):
+        raise KeyError("missing")
+
+    def failed(_uid):
+        raise OSError("database unavailable")
+
+    for lookup in (missing, failed, lambda _uid: 1000):
+        processes = FixedProcesses(
+            records={5: InspectedProcess(5, 1000, "idle", "worker")}
+        )
+        listener = make_listener(
+            tmp_path, processes, username_lookup=lookup
+        )
+
+        listener.submit("ps")
+
+        (listing,) = listing_owners(listener)
+        assert listing.members[0].displayed_user == "1000"
+
+
+def test_ps_capture_is_stable_and_a_later_command_is_fresh(tmp_path):
+    processes = FixedProcesses(
+        records={5: InspectedProcess(5, 1000, "sleeping", "first")}
+    )
+    names = iter(("alpha", "beta"))
+    listener = make_listener(
+        tmp_path, processes, username_lookup=lambda _uid: next(names)
+    )
+
+    listener.submit("ps")
+    (first,) = listing_owners(listener)
+    processes.records[5] = InspectedProcess(5, 1000, "running", "second")
+    assert first.members[0].state == "sleeping"
+    assert first.members[0].displayed_user == "alpha"
+    assert first.members[0].command == "first"
+
+    listener.submit("ps")
+    first_again, second = listing_owners(listener)
+    assert first_again is first
+    assert second is not first
+    assert second.members[0].state == "running"
+    assert second.members[0].displayed_user == "beta"
+    assert second.members[0].command == "second"
+    assert processes.list_uids == [1000, 1000]
+
+
+def test_ps_enumeration_failure_has_no_partial_listing(tmp_path):
+    class FailingProcesses(FixedProcesses):
+        def list_for_uid(self, uid):
+            self.list_uids.append(uid)
+            raise OSError("proc unavailable")
+
+    processes = FailingProcesses()
+    listener = make_listener(
+        tmp_path,
+        processes,
+        username_lookup=lambda _uid: pytest.fail("username lookup must not run"),
+    )
+
+    listener.submit("ps")
+
+    assert processes.list_uids == [1000]
+    assert history_text(listener) == (
+        "Error: cannot list processes: proc unavailable.",
+    )
+    assert listing_owners(listener) == ()
+    assert listener.history.rows[0].listing_owner is None
+
+
+def test_listing_owner_survives_suffix_eviction_then_disappears(tmp_path):
+    for name in ("a", "b", "c"):
+        (tmp_path / name).write_text(name)
+    listener = make_listener(tmp_path, history_max_rows=2)
+
+    listener.submit("ls")
+
+    assert len(listener.history.rows) == 2
+    owner = listener.history.rows[0].listing_owner
+    assert type(owner) is DirectoryListing
+    assert all(row.listing_owner is owner for row in listener.history.rows)
+
+    listener.submit("unknown-one")
+    listener.submit("unknown-two")
+
+    assert all(row.listing_owner is None for row in listener.history.rows)
+    assert not any(row.listing_owner is owner for row in listener.history.rows)
