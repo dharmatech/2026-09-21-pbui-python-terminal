@@ -21,7 +21,51 @@ have that skill loaded.
 
 `uv pip install` is not how this project takes a dependency.
 
-Design for the current exploration is
-`docs/design/implementation/listener/charter.md`. Implementers follow
-an approved checkpoint. The checkpoint repeats the `uv` commands for
-the slice it covers.
+## What this project is
+
+pbui is an exploration of a presentation-based listener that feels
+comfortable on Linux. The program is a full-screen terminal
+application. Its history retains live objects, and a click hands the
+object to the next command. The implemented listener is files,
+directories, and processes: `ls`, `ps`, `show`, `cd`, `rm`, and
+`kill`.
+
+These are the guiding influences for discussion and design. They are
+not a backlog, and they are not permission to replace the Linux
+program with a Lisp machine or a CLIM port.
+
+- Eugene C. Ciccarelli IV, *Presentation Based User Interfaces*, MIT
+  AI Lab AITR-794 (1984). The copy read for this project is in the
+  sibling journal `2026-09-21-presentation-ui`. This is the
+  architectural idea: a presentation is a visible form of an
+  application object, a presenter keeps that form current, and a
+  recognizer turns the user's manipulation into commands. Style is
+  separate from the objects. PSBase and its icon, menu, and
+  annotation desktops are not the product.
+- The Symbolics Genera Dynamic Lisp Listener, on Dynamic Windows.
+  This is the interaction the listener copies: the output history
+  retains the object, `present` and `accept` are the two directions,
+  a click during accept supplies the object, and a click with
+  nothing waiting runs the default command. A documentation line
+  says what that click will do.
+- Scott McKay, William York, and Michael McMahon, "A Presentation
+  Manager Based on Application Semantics" (UIST 1989). The short
+  account of that Genera mechanism: a presentation is the object,
+  its type, and its ink. Operations come from the presentation-type
+  lattice, not from a widget under the pointer.
+- CLIM, and the CLIM and McCLIM listeners. The portable descendant
+  of Dynamic Windows. Use it when the question is how a listener
+  implemented `present`, `accept`, translators, or output recording.
+  McCLIM is the one that can be run and read. Reimplementing CLIM is
+  not the goal.
+
+For implementation of the program as it stands, the accepted
+specification is `docs/design/implementation/listener/spec.md`. The
+charter beside it is the original assignment, not the current law.
+The next exploration is
+`docs/design/implementation/listings/charter.md`: tables, an action
+menu, and sort and filter that redisplay an `ls` or `ps` listing.
+Until that exploration has an accepted specification, it is
+discussion, not implementation. Implementers follow one approved
+checkpoint. The checkpoint repeats the `uv` commands for the slice
+it covers.

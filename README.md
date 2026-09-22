@@ -4,16 +4,24 @@ A terminal listener that keeps live objects in its history. Printed
 names are presentations of files, directories, and processes. A click
 hands the object to the next command.
 
+The guiding influences are Ciccarelli's *Presentation Based User
+Interfaces* (AITR-794), the Genera Dynamic Lisp Listener, the McKay,
+York, and McMahon paper on Dynamic Windows (UIST 1989), and the CLIM
+and McCLIM listeners. [`AGENTS.md`](AGENTS.md) says what each one is
+for. They guide discussion. The accepted specification is the law for
+implementation.
+
 Design for each exploration lives under
 `docs/design/implementation/<name>/`: a charter, a spec, and a
-`checkpoints/` folder. The program itself will live at this project
-root. Create it, its environment, and its dependencies with uv only.
-[`AGENTS.md`](AGENTS.md) is that rule.
+`checkpoints/` folder. The program lives at this project root. Create
+it, its environment, and its dependencies with uv only.
+[`AGENTS.md`](AGENTS.md) is that rule too.
 
 | Exploration | What it is | Status |
 |---|---|---|
-| [`listener`](docs/design/implementation/listener/README.md) | First listener: `ls`, `ps`, `show`, `cd`, `rm`, `kill` | Charter written, waiting for review |
+| [`listener`](docs/design/implementation/listener/README.md) | First listener: `ls`, `ps`, `show`, `cd`, `rm`, `kill` | Implemented through listener 005 |
+| [`listings`](docs/design/implementation/listings/README.md) | Tables, an action menu, and sort and filter on `ls` and `ps` | Charter written, waiting for review |
 
-The designer conversation for this exploration reads
-[`docs/design/implementation/listener/charter.md`](docs/design/implementation/listener/charter.md).
-If you have been told to read that file, it is the whole assignment.
+A new discussion should read [`AGENTS.md`](AGENTS.md). The listener
+specification is the law for the program as it stands. The listings
+charter is the assignment for the next exploration.
