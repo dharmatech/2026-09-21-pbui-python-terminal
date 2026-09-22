@@ -1,6 +1,6 @@
 # Specification — pbui presentation listener
 
-**Status:** design for review. This specification defines the first `pbui`
+**Status:** accepted specification. This specification defines the first `pbui`
 exploration. It is the complete input to later checkpoint-manager and
 implementation conversations; those conversations do not need the charter.
 
@@ -16,6 +16,14 @@ next is added. The terminal layer is likely to require two checkpoints (drawing
 and layout first, interaction and lifecycle second); the other layers should
 each fit in one checkpoint. A checkpoint manager may split a layer further but
 must preserve this order and must not add features.
+
+## Checkpoint series
+
+Checkpoint files go in
+`docs/design/implementation/listener/checkpoints/`. Their identities are
+**listener 000**, **listener 001**, and so on. The checkpoint manager writes
+exactly one checkpoint and then stops. Application code and tests remain at the
+project root; they never move into the design or checkpoint directories.
 
 ## 1. Product boundary
 
@@ -61,47 +69,63 @@ uv.lock
 src/
   pbui/
     __init__.py
-    __main__.py
     substrate.py       # type registry, presentations, accept, chips, history
     text.py            # pure text drawing, display-column layout, hit testing
     domain.py          # File, Directory, Process, Text, Error and parsers
     commands.py        # headless listener, six commands, host seams
-    terminal.py        # the only module that imports Textual
+    terminal.py        # added in layer 4; the only module importing Textual
+    __main__.py        # added in layer 4 with the console entry point
 tests/
   test_substrate.py
   test_domain.py
   test_commands.py
-  test_terminal.py
+  test_terminal.py       # added in layer 4
 ```
 
-The package import name and console script are both `pbui`. The script calls
-`pbui.terminal:main`; `python -m pbui` calls the same function. This module split
-is a layer boundary, not permission to create parallel object models.
+The package import name is `pbui` from the first layer. The `pbui` console
+script, `pbui.terminal:main`, and `python -m pbui` are not required or exposed
+until layer 4. This module split is a layer boundary, not permission to create
+parallel object models.
 
 The project uses **uv for its entire Python lifecycle**. The initial project
 checkpoint runs these commands from the project root:
 
 ```console
 uv init --package --python 3.11
-uv add textual rich wcwidth
-uv add --dev pytest pytest-asyncio
+uv add wcwidth
+uv add --dev pytest
 uv sync
 ```
 
-The generated console-script entry is changed to `pbui = "pbui.terminal:main"`.
-Development and verification use:
+If `uv init --package` generates a console-script entry, remove or defer that
+entry; the first three layers do not promise an executable application. Their
+checkpoints are verified only with:
 
 ```console
-uv run pbui
 uv run pytest
 ```
 
-Every checkpoint repeats only the applicable `uv sync`, `uv run pytest ...`, or
-`uv run pbui` commands. Dependencies are added with `uv add` or `uv add --dev`
-so they are recorded in both `pyproject.toml` and `uv.lock`. Do not create a
-virtual environment by hand and do not use `pip`, `python -m pip`, `uv pip
-install`, Poetry, Pipenv, Conda, Hatch, or globally installed packages. If `uv`
-is unavailable, stop and tell the human.
+Layer 4 adds its dependencies and entry points:
+
+```console
+uv add textual rich
+uv add --dev pytest-asyncio
+uv sync
+```
+
+That layer creates `pbui.terminal:main`, sets the console script to
+`pbui = "pbui.terminal:main"`, adds `src/pbui/__main__.py` to call the same
+function, and verifies both `uv run pytest` and `uv run pbui`. Before layer 4,
+do not require `pbui.terminal:main`, `src/pbui/__main__.py`, `uv run pbui`, or
+`python -m pbui`.
+
+Every checkpoint repeats only the applicable `uv sync` and `uv run pytest`
+commands; the terminal checkpoint may additionally use `uv run pbui` for its
+hand check. Dependencies are added with `uv add` or `uv add --dev` so they are
+recorded in both `pyproject.toml` and `uv.lock`. Do not create a virtual
+environment by hand and do not use `pip`, `python -m pip`, `uv pip install`,
+Poetry, Pipenv, Conda, Hatch, or globally installed packages. If `uv` is
+unavailable, stop and tell the human.
 
 ## 3. Layer 1: presentation substrate
 
@@ -117,10 +141,10 @@ names. The registry is application-defined: it is not generated from Python
 classes, method reflection, or inheritance.
 
 Type acceptance is exact registry identity. Python subclass relationships do
-not imply presentation compatibility. In particular, the later `Directory`
-type is not a subtype of `File` for acceptance. The substrate must also allow a
-presentation type to be used with values whose Python class is otherwise
-uninteresting.
+not imply presentation compatibility. Two distinct registered types are not
+acceptable in each other's place even if their stored values have related
+Python classes. The substrate must also allow a presentation type to be used
+with values whose Python class is otherwise uninteresting.
 
 A `Presentation` contains:
 
@@ -189,7 +213,7 @@ hit-testable. When layout width changes, the terminal layer preserves the
 oldest visible logical-row anchor where possible, then clamps it. Thus an older
 retained name remains connected to its object after both scroll and resize.
 
-### 3.4 Accept, chips, and default translation
+### 3.4 Accept, chips, and translation
 
 `AcceptRequest` holds the command name, a nonempty set of acceptable registered
 types, and the continuation to invoke with an accepted value. While a request
@@ -210,10 +234,13 @@ For this product, clicking a valid target supplies the chip and immediately
 runs the waiting command, so a terminal-rendered chip may be brief; its atomic
 model and direct value path are still required and tested.
 
-With no pending accept, the default translator maps the domain `File`,
-`Directory`, and `Process` types to `show` with the stored object. `Text` and
-`Error` have no default command. Only a left click invokes translation or
-acceptance.
+The substrate exposes a `TranslatorTable` keyed by registered presentation
+type. The table supports explicit registration and lookup of a translator that
+receives the stored object. It begins empty, has no knowledge of domain type
+names or commands, and derives nothing from Python classes. With no pending
+accept, a left click invokes the registered translator for the innermost hit,
+if one exists; otherwise it has no command effect. Only a left click invokes
+translation or acceptance.
 
 ## 4. Layer 2: domain objects and printers
 
@@ -316,8 +343,8 @@ PID  STATE  COMMAND
 ```
 
 Only `PID` is the `Process` presentation. Rows sort by integer pid. `STATE` is
-one of the readable state words in section 5.3, and `COMMAND` is plain text.
-There is no separate heading row.
+one of the readable state words in section 5.3, and `COMMAND` is the escaped
+command text defined there. There is no separate heading row.
 
 `show` emits one `Text` detail row, not `repr` of the stored object:
 
@@ -333,7 +360,7 @@ the escaped string returned by `readlink`, not a canonical path. For a live
 symlink, file size and mtime come from followed `stat`. For a broken symlink,
 the type text is `file (broken symlink)` and size and mtime come from `lstat`.
 Directory detail does not add size or mtime. A process detail always performs a
-fresh inspection and includes its current command and state.
+fresh inspection and includes its current command text and state.
 
 Successful effects use these `Text` rows:
 
@@ -361,7 +388,10 @@ service. It starts with an injected cwd; production injects `os.getcwd()`.
 shell and process-global cwd are not mutated.
 
 The controller presents output through the substrate. It has no Textual import
-and can execute all six commands in tests.
+and can execute all six commands in tests. During command-layer composition it
+registers the `show` translator for exactly `File`, `Directory`, and `Process`.
+It registers no translator for `Text` or `Error`; the substrate itself names
+none of these types.
 
 ### 5.1 Input dispatch
 
@@ -419,11 +449,16 @@ own. Production uses `os.getuid()`, `os.getpid()`, Linux `/proc`, and
 `os.kill(pid, signal.SIGTERM)`. It never shells out to `ps`.
 
 Production process listing iterates numeric `/proc` directory names and reads
-`/proc/PID/status`. It uses `Name`, the first integer in `Uid` (real uid), and
-the code at the start of `State`. It includes only processes whose real uid
-equals the listener's uid and skips any process whose directory disappears or
-whose required fields are unreadable or malformed. It does not special-case
-kernel threads. State codes map as follows:
+both `/proc/PID/status` and `/proc/PID/cmdline`. It uses `Name`, the first
+integer in `Uid` (real uid), and the code at the start of `State` from `status`.
+For the `COMMAND` column and the `command:` field in `show`, it reads the raw
+bytes from `cmdline`, renders every NUL byte as a space, decodes with the
+filesystem encoding and `surrogateescape`, and then applies the existing
+one-row control-character escaping. If `cmdline` is empty, it uses the `Name`
+field from `status` instead and applies the same escaping. It includes only
+processes whose real uid equals the listener's uid and skips any process whose
+directory disappears or whose required files or fields are unreadable or
+malformed. It does not special-case kernel threads. State codes map as follows:
 
 | Code | Word |
 |---|---|
@@ -437,9 +472,14 @@ kernel threads. State codes map as follows:
 | `I` | `idle` |
 | anything else | `unknown` |
 
-The listener's own pid is included when inspectable; its command name and pid
-make it identifiable in `show`. `show Process` always calls `inspect` again. If
-the process exited or cannot be inspected, it appends `Error`.
+`list_for_uid` and `inspect` use this same command-text rule. For a direct
+inspection, unreadable or malformed required process data is an inspection
+failure, which `show` reports as `Error`.
+
+The listener's own pid is included when inspectable; its command text contains
+`pbui` and, together with its pid, makes it identifiable in the listing and in
+`show`. `show Process` always calls `inspect` again. If the process exited or
+cannot be inspected, it appends `Error`.
 
 Tests inject a fixed process table and a kill recorder. The own pid is
 injectable, so the own-process refusal never targets pytest. Automated tests do
@@ -520,13 +560,31 @@ and resize. Required exact sentences are:
 | Nothing under pointer while `rm` waits | `Accept File for rm: point to a highlighted File and click; Ctrl-G or Esc cancels.` |
 | `File` under pointer while `rm` waits | `Accept File for rm: click to use file “NAME” and run rm.` |
 | `Directory` under pointer while `rm` waits | `Accept File for rm: directory “NAME” is not a File target.` |
+| `Process` under pointer while `rm` waits | `Accept File for rm: process PID is not a File target.` |
 | `Text` under pointer while `rm` waits | `Accept File for rm: Text is not a File target.` |
+| `Error` under pointer while `rm` waits | `Accept File for rm: Error is not a File target.` |
+| Nothing under pointer while `cd` waits | `Accept Directory for cd: point to a highlighted Directory and click; Ctrl-G or Esc cancels.` |
+| `Directory` under pointer while `cd` waits | `Accept Directory for cd: click to use directory “NAME” and run cd.` |
+| `File` under pointer while `cd` waits | `Accept Directory for cd: file “NAME” is not a Directory target.` |
+| `Process` under pointer while `cd` waits | `Accept Directory for cd: process PID is not a Directory target.` |
+| `Text` under pointer while `cd` waits | `Accept Directory for cd: Text is not a Directory target.` |
+| `Error` under pointer while `cd` waits | `Accept Directory for cd: Error is not a Directory target.` |
+| Nothing under pointer while `kill` waits | `Accept Process for kill: point to a highlighted Process and click; Ctrl-G or Esc cancels.` |
+| `Process` under pointer while `kill` waits | `Accept Process for kill: click to use process PID and run kill.` |
+| `File` under pointer while `kill` waits | `Accept Process for kill: file “NAME” is not a Process target.` |
+| `Directory` under pointer while `kill` waits | `Accept Process for kill: directory “NAME” is not a Process target.` |
+| `Text` under pointer while `kill` waits | `Accept Process for kill: Text is not a Process target.` |
+| `Error` under pointer while `kill` waits | `Accept Process for kill: Error is not a Process target.` |
+| Nothing under pointer while `show` waits | `Accept File, Directory, or Process for show: point to a highlighted File, Directory, or Process and click; Ctrl-G or Esc cancels.` |
+| `File` under pointer while `show` waits | `Accept File, Directory, or Process for show: click to use file “NAME” and run show.` |
+| `Directory` under pointer while `show` waits | `Accept File, Directory, or Process for show: click to use directory “NAME” and run show.` |
+| `Process` under pointer while `show` waits | `Accept File, Directory, or Process for show: click to use process PID and run show.` |
+| `Text` under pointer while `show` waits | `Accept File, Directory, or Process for show: Text is not a File, Directory, or Process target.` |
+| `Error` under pointer while `show` waits | `Accept File, Directory, or Process for show: Error is not a File, Directory, or Process target.` |
 
-The same grammar generalizes to other waits: `Accept TYPE-LIST for COMMAND`, a
-matching object says `click to use ... and run COMMAND`, and a nonmatching type
-says `TYPE is not a TYPE-LIST target`. The `show` type list is printed as
-`File, Directory, or Process`. These words supplement rather than replace the
-visual target treatment.
+These table sentences are the complete normative wording pattern; do not
+generate alternatives. `ls` does not enter accept. The words supplement rather
+than replace the visual target treatment.
 
 ### 6.3 Visual treatments
 
@@ -578,8 +636,10 @@ control returns to the shell.
 
 ## 7. Verification
 
-All automated tests run through uv and avoid the user's live files and process
-table. No test imports Textual except `tests/test_terminal.py`.
+All automated tests run through uv and avoid the user's live files and arbitrary
+processes. The sole live-process exception is the isolated production-SIGTERM
+test in section 7.3, which creates and signals only its own child. No test
+imports Textual except `tests/test_terminal.py`.
 
 ### 7.1 Pure substrate tests — `tests/test_substrate.py`
 
@@ -591,7 +651,9 @@ At minimum, tests must:
 - accept a matching type and leave state unchanged for a nonmatching click;
 - pass a chip's original object by identity without parsing its label;
 - remove a chip atomically with Backspace;
-- prove `File` and `Directory` exact types are not interchangeable;
+- register translators for arbitrary types and prove lookup and invocation do
+  not depend on domain names or Python classes;
+- prove two arbitrary exact types are not interchangeable;
 - treat a filename containing a space as one span;
 - verify display-cell spans for a wide and a combining character;
 - retain only the newest 500 logical rows; and
@@ -600,7 +662,7 @@ At minimum, tests must:
 Run this layer with:
 
 ```console
-uv run pytest tests/test_substrate.py
+uv run pytest
 ```
 
 ### 7.2 Domain tests — `tests/test_domain.py`
@@ -609,12 +671,13 @@ Use `tmp_path` to cover ordinary files, directories, a symlink to each, a
 broken symlink, missing paths, absolute path capture before cwd changes, display
 escaping, spaces as one name, and case-sensitive displayed-name sorting. Prove
 that a symlink to a directory classifies as `Directory`, a broken link as
-`File`, and the stored link path is not canonicalized to its target.
+`File`, the exact `File` and `Directory` types are not interchangeable, and the
+stored link path is not canonicalized to its target.
 
 Run this layer with:
 
 ```console
-uv run pytest tests/test_domain.py
+uv run pytest
 ```
 
 ### 7.3 Command tests — `tests/test_commands.py`
@@ -626,7 +689,8 @@ including:
 - `ls` dotfiles, names with spaces, sorting, missing/non-directory errors, and
   object-bearing name spans;
 - `ps` uid filtering, unreadable-entry skipping, numeric ordering, and the
-  listener's own visible pid;
+  listener's own visible pid; cover NUL-to-space `cmdline` rendering and the
+  empty-`cmdline` fallback to `Name`;
 - all `show` detail forms and stale/missing object errors;
 - `cd` preserving history, rejecting a file or missing directory, and not
   retargeting an older path;
@@ -634,17 +698,27 @@ including:
   links to directories, confirming success, and reporting a missing path;
 - `kill` recording only `SIGTERM`, refusing the injected own pid, pid 1, zero,
   and negative pids, and reporting missing or unsignalable processes;
-- unknown commands and forbidden extra arguments; and
+- unknown commands and forbidden extra arguments;
 - missing arguments entering accept, non-target clicks preserving input, and
-  target clicks executing with the object rather than its printed name.
+  target clicks executing with the object rather than its printed name; and
+- command-layer composition registering `show` translators for exactly
+  `File`, `Directory`, and `Process`, with no `Text` or `Error` translator.
 
-No command test calls production `os.kill`. No test unlinks a path outside its
+All ordinary command tests use the kill recorder. In addition, exactly one
+automated integration test starts its own short-lived child with
+`subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])` and
+verifies that child is alive. It invokes `kill` for `ProcessRef(child.pid)`
+through a listener using the production process service, so the production
+`send_sigterm` path reaches `os.kill(child.pid, signal.SIGTERM)`. It waits for
+that exact child and asserts `child.returncode == -signal.SIGTERM`. Cleanup, if
+needed after a failed assertion or timeout, may signal that same child only.
+The test never signals any other pid. No test unlinks a path outside its
 `tmp_path` root.
 
 Run this layer with:
 
 ```console
-uv run pytest tests/test_commands.py
+uv run pytest
 ```
 
 ### 7.4 Headless Textual test — `tests/test_terminal.py`
@@ -667,31 +741,40 @@ uv run pytest
 
 ### 7.5 Live hand check
 
-After automated tests pass, create a fresh temporary directory containing a
-subdirectory, a disposable file named `file with space`, and enough extra
-entries to wrap on a narrow terminal. Start `uv run pbui`, then perform these
-steps only against that temporary directory:
+After automated tests pass, create a fresh temporary directory under the
+project root so `uv` can still discover the project. Populate it with a
+subdirectory, two disposable files including one named `file with space`, and
+enough extra entries to wrap on a narrow terminal. In the shell, `cd` into that
+fresh directory **before** running `uv run pbui`. Record its absolute path from
+`pwd`. The first prompt must show that exact absolute directory; if it does not,
+exit and do not perform the destructive part of this check.
 
-1. Type `cd`, press Enter, hover the directory presentation from an earlier
-   `ls` or type the temporary directory path, and enter it. Confirm the prompt
-   shows its absolute path.
-2. Run `ls` several times. Hover a file and a directory and confirm the exact
-   documentation wording changes. Click `file with space` with no command and
-   confirm `show` displays its absolute path, classification, size, and mtime.
-3. Create or retain a second disposable file. Type `rm` and press Enter.
-   Confirm files are green/underlined targets, directories are dim/inert, and
-   the documentation line names `File`. Click the disposable file and confirm
-   it alone is unlinked. Repeat `rm`, click a directory, and confirm nothing is
-   removed and the input still waits.
+Then perform these steps without changing pbui's cwd:
+
+1. Run `ls` before any hover or click that expects a listing. Run it several
+   times so older rows are available for the scroll check.
+2. Hover a file and a directory and confirm the exact documentation wording
+   changes. Click `file with space` with no command and confirm `show` displays
+   its absolute path, classification, size, and mtime.
+3. Before typing `rm`, compare the prompt with the recorded temporary-directory
+   path again. **`rm` is forbidden unless the prompt still shows that temporary
+   directory.** A click during `rm` is not simulated: it unlinks a real file in
+   whatever directory the prompt shows. Type `rm`, press Enter, confirm files
+   are green/underlined targets and directories are dim/inert, then click only
+   the designated disposable file and confirm it alone is unlinked. Repeat
+   `rm`, click the directory, and confirm nothing is removed and the input still
+   waits.
 4. Press `Ctrl-G`; confirm the wait and input clear. Repeat once with Escape.
 5. Scroll to an older listing, resize the terminal so rows rewrap, then click an
    older retained name. Confirm `show` receives that object's absolute path,
    not characters at the old screen coordinates.
-6. Run `ps`, identify pbui's pid, and click it to see a current process detail.
-   Do not run `kill` against a live process during this check.
+6. Run `ps`, identify pbui's pid by command text containing `pbui`, and click it
+   to see a current process detail. Do not run `kill` against any live process
+   during this hand check.
 7. Exit with `Ctrl-D` and verify the ordinary shell screen, cursor, input, and
-   mouse behavior are restored. Start once more, exit with `Ctrl-C`, and verify
-   the same restoration with no traceback.
+   mouse behavior are restored. Start once more from the same temporary
+   directory, exit with `Ctrl-C`, and verify the same restoration with no
+   traceback.
 
 This short hand check is the only required exercise against the live process
 table and unrestricted filesystem. Remove the temporary directory afterward.
