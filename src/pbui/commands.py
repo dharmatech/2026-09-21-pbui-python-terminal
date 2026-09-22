@@ -1,0 +1,814 @@
+"""Headless listener, host seams, and the six ``pbui`` commands.
+
+The module is deliberately independent of terminal UI libraries.  It owns the
+coherent application model which a later terminal adapter will render.
+"""
+
+from __future__ import annotations
+
+import errno
+import os
+import signal
+import stat as stat_module
+import sys
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from typing import Protocol
+
+from pbui.domain import (
+    DirectoryRef,
+    DomainDrawingContexts,
+    DomainParseError,
+    DomainTypes,
+    FileRef,
+    ProcessRef,
+    TypedDomainValue,
+    compose_failure_message,
+    escape_display,
+    format_empty_directory,
+    format_path_detail,
+    format_process_detail,
+    format_removed_file,
+    format_signal_result,
+    make_domain_drawing_contexts,
+    parse_directory,
+    parse_file,
+    parse_process,
+    parse_show,
+    path_listing_row,
+    path_sort_key,
+    process_listing_row,
+    register_domain_types,
+)
+from pbui.substrate import (
+    AcceptRequest,
+    Chip,
+    Presentation,
+    PresentationHistory,
+    PresentationType,
+    PresentationTypeRegistry,
+    SubstrateState,
+    TranslatorTable,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class FilesystemEntry:
+    """The name and lexical absolute path of one directory child."""
+
+    name: str
+    path: str
+
+
+class FilesystemService(Protocol):
+    """Filesystem operations used by the headless listener."""
+
+    def abspath(self, path: str) -> str: ...
+
+    def stat(self, path: str) -> os.stat_result: ...
+
+    def lstat(self, path: str) -> os.stat_result: ...
+
+    def readlink(self, path: str) -> str: ...
+
+    def iter_directory(self, path: str) -> Iterable[FilesystemEntry]: ...
+
+    def unlink(self, path: str) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionFilesystem:
+    """Production filesystem service backed directly by :mod:`os`."""
+
+    def abspath(self, path: str) -> str:
+        return os.path.abspath(path)
+
+    def stat(self, path: str) -> os.stat_result:
+        return os.stat(path)
+
+    def lstat(self, path: str) -> os.stat_result:
+        return os.lstat(path)
+
+    def readlink(self, path: str) -> str:
+        return os.readlink(path)
+
+    def iter_directory(self, path: str) -> tuple[FilesystemEntry, ...]:
+        with os.scandir(path) as entries:
+            return tuple(
+                FilesystemEntry(entry.name, os.path.join(path, entry.name))
+                for entry in entries
+            )
+
+    def unlink(self, path: str) -> None:
+        os.unlink(path)
+
+
+class RootedFilesystem:
+    """A real-filesystem adapter confined to one canonical test root.
+
+    Followed operations validate the canonical candidate.  Operations on a
+    final directory entry validate the canonical parent and retain the final
+    component, allowing a safe final symlink to be inspected or unlinked.
+    """
+
+    def __init__(self, allowed_root: os.PathLike[str] | str) -> None:
+        root = os.path.realpath(os.path.abspath(os.fspath(allowed_root)))
+        root_stat = os.stat(root)
+        if not stat_module.S_ISDIR(root_stat.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", root)
+        self._allowed_root = root
+
+    @property
+    def allowed_root(self) -> str:
+        return self._allowed_root
+
+    def _normalized_absolute(self, path: str) -> str:
+        if not isinstance(path, str):
+            raise TypeError("path must be a string")
+        if not os.path.isabs(path) or os.path.abspath(path) != path:
+            raise PermissionError(errno.EACCES, "path is not absolute and normalized", path)
+        return path
+
+    def _is_contained(self, candidate: str) -> bool:
+        try:
+            return os.path.commonpath((self._allowed_root, candidate)) == self._allowed_root
+        except ValueError:
+            return False
+
+    def _require_contained(self, candidate: str, original: str) -> None:
+        if not self._is_contained(candidate):
+            raise PermissionError(errno.EACCES, "path is outside allowed root", original)
+
+    def _check_followed(self, path: str) -> str:
+        candidate = self._normalized_absolute(path)
+        followed = os.path.realpath(candidate)
+        self._require_contained(followed, candidate)
+        return candidate
+
+    def _check_final_entry(self, path: str) -> str:
+        candidate = self._normalized_absolute(path)
+        if candidate == self._allowed_root:
+            return candidate
+        parent = os.path.realpath(os.path.dirname(candidate))
+        self._require_contained(parent, candidate)
+        return candidate
+
+    def abspath(self, path: str) -> str:
+        candidate = os.path.abspath(path)
+        return self._check_final_entry(candidate)
+
+    def stat(self, path: str) -> os.stat_result:
+        return os.stat(self._check_followed(path))
+
+    def lstat(self, path: str) -> os.stat_result:
+        return os.lstat(self._check_final_entry(path))
+
+    def readlink(self, path: str) -> str:
+        return os.readlink(self._check_final_entry(path))
+
+    def iter_directory(self, path: str) -> tuple[FilesystemEntry, ...]:
+        candidate = self._check_followed(path)
+        with os.scandir(candidate) as entries:
+            return tuple(
+                FilesystemEntry(entry.name, os.path.join(candidate, entry.name))
+                for entry in entries
+            )
+
+    def unlink(self, path: str) -> None:
+        os.unlink(self._check_final_entry(path))
+
+
+@dataclass(frozen=True, slots=True)
+class InspectedProcess:
+    """Freshly inspected process information used for listing and details."""
+
+    pid: int
+    real_uid: int
+    state: str
+    command: str
+
+
+class ProcessService(Protocol):
+    @property
+    def own_uid(self) -> int: ...
+
+    @property
+    def own_pid(self) -> int: ...
+
+    def list_for_uid(self, uid: int) -> Iterable[InspectedProcess]: ...
+
+    def inspect(self, pid: int) -> InspectedProcess: ...
+
+    def send_sigterm(self, pid: int) -> None: ...
+
+
+class ProcessInspectionError(OSError):
+    """A missing or malformed required field in a process record."""
+
+
+_PROCESS_STATES = {
+    "R": "running",
+    "S": "sleeping",
+    "D": "disk-sleep",
+    "T": "stopped",
+    "t": "tracing",
+    "Z": "zombie",
+    "X": "dead",
+    "x": "dead",
+    "I": "idle",
+}
+
+
+def process_state_word(code: str) -> str:
+    """Translate one Linux process-state code to the product wording."""
+
+    return _PROCESS_STATES.get(code, "unknown")
+
+
+class LinuxProcessService:
+    """Linux process inspection through ``/proc`` and signaling through ``os``."""
+
+    def __init__(
+        self,
+        proc_root: os.PathLike[str] | str = "/proc",
+        *,
+        getuid: Callable[[], int] | None = None,
+        getpid: Callable[[], int] | None = None,
+        kill: Callable[[int, int], None] | None = None,
+    ) -> None:
+        self._proc_root = os.fspath(proc_root)
+        self._getuid = os.getuid if getuid is None else getuid
+        self._getpid = os.getpid if getpid is None else getpid
+        self._kill = os.kill if kill is None else kill
+        self._own_uid = self._getuid()
+        self._own_pid = self._getpid()
+
+    @property
+    def own_uid(self) -> int:
+        return self._own_uid
+
+    @property
+    def own_pid(self) -> int:
+        return self._own_pid
+
+    @property
+    def proc_root(self) -> str:
+        return self._proc_root
+
+    def _read_status(self, pid: int) -> tuple[str, int, str]:
+        status_path = os.path.join(self._proc_root, str(pid), "status")
+        with open(status_path, "rb") as status_file:
+            status_text = status_file.read().decode(
+                sys.getfilesystemencoding(), errors="surrogateescape"
+            )
+
+        fields: dict[str, str] = {}
+        for line in status_text.splitlines():
+            key, separator, value = line.partition(":")
+            if separator and key in {"Name", "Uid", "State"} and key not in fields:
+                fields[key] = value.lstrip(" \t")
+
+        missing = {"Name", "Uid", "State"}.difference(fields)
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise ProcessInspectionError(
+                f"malformed process {pid} status: missing {names}"
+            )
+        if not fields["Name"]:
+            raise ProcessInspectionError(f"malformed process {pid} status: empty Name")
+
+        uid_fields = fields["Uid"].split()
+        if not uid_fields:
+            raise ProcessInspectionError(f"malformed process {pid} status: invalid Uid")
+        try:
+            real_uid = int(uid_fields[0], 10)
+        except ValueError as error:
+            raise ProcessInspectionError(
+                f"malformed process {pid} status: invalid Uid"
+            ) from error
+
+        state_value = fields["State"]
+        if not state_value or state_value[0].isspace():
+            raise ProcessInspectionError(f"malformed process {pid} status: invalid State")
+        return fields["Name"], real_uid, process_state_word(state_value[0])
+
+    def inspect(self, pid: int) -> InspectedProcess:
+        name, real_uid, state = self._read_status(pid)
+        cmdline_path = os.path.join(self._proc_root, str(pid), "cmdline")
+        with open(cmdline_path, "rb") as cmdline_file:
+            raw_command = cmdline_file.read()
+        if raw_command:
+            command = raw_command.replace(b"\0", b" ").decode(
+                sys.getfilesystemencoding(), errors="surrogateescape"
+            )
+        else:
+            command = name
+        return InspectedProcess(pid, real_uid, state, command)
+
+    def list_for_uid(self, uid: int) -> tuple[InspectedProcess, ...]:
+        with os.scandir(self._proc_root) as entries:
+            pids = sorted(
+                int(entry.name)
+                for entry in entries
+                if entry.name.isascii() and entry.name.isdecimal()
+            )
+        records: list[InspectedProcess] = []
+        for pid in pids:
+            try:
+                record = self.inspect(pid)
+            except OSError:
+                continue
+            if record.real_uid == uid:
+                records.append(record)
+        return tuple(records)
+
+    def send_sigterm(self, pid: int) -> None:
+        self._kill(pid, signal.SIGTERM)
+
+
+_ABSENT_OR_UNRESOLVED = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
+
+
+class HeadlessListener:
+    """One UI-independent listener model and its complete command layer."""
+
+    COMMAND_NAMES = ("ls", "ps", "show", "kill", "cd", "rm")
+
+    def __init__(
+        self,
+        starting_cwd: str,
+        filesystem: FilesystemService,
+        processes: ProcessService,
+        *,
+        history_max_rows: int = PresentationHistory.MAX_LOGICAL_ROWS,
+    ) -> None:
+        normalized_cwd = filesystem.abspath(starting_cwd)
+        cwd_stat = filesystem.stat(normalized_cwd)
+        if not stat_module.S_ISDIR(cwd_stat.st_mode):
+            raise NotADirectoryError(
+                errno.ENOTDIR, "starting cwd is not a directory", normalized_cwd
+            )
+
+        self._filesystem = filesystem
+        self._processes = processes
+        self._cwd = normalized_cwd
+        self._registry = PresentationTypeRegistry()
+        self._types = register_domain_types(self._registry)
+        self._history = PresentationHistory(history_max_rows)
+        self._contexts = make_domain_drawing_contexts(self._types)
+        self._state = SubstrateState()
+        self._translators = TranslatorTable()
+        for presentation_type in (
+            self._types.file,
+            self._types.directory,
+            self._types.process,
+        ):
+            self._translators.register(presentation_type, self._translate_show)
+
+    @classmethod
+    def production(cls) -> HeadlessListener:
+        filesystem = ProductionFilesystem()
+        return cls(os.getcwd(), filesystem, LinuxProcessService())
+
+    @property
+    def cwd(self) -> str:
+        return self._cwd
+
+    @property
+    def current_cwd(self) -> str:
+        return self._cwd
+
+    @property
+    def filesystem(self) -> FilesystemService:
+        return self._filesystem
+
+    @property
+    def processes(self) -> ProcessService:
+        return self._processes
+
+    @property
+    def registry(self) -> PresentationTypeRegistry:
+        return self._registry
+
+    @property
+    def types(self) -> DomainTypes:
+        return self._types
+
+    @property
+    def domain_types(self) -> DomainTypes:
+        return self._types
+
+    @property
+    def history(self) -> PresentationHistory:
+        return self._history
+
+    @property
+    def drawing_contexts(self) -> DomainDrawingContexts:
+        return self._contexts
+
+    @property
+    def state(self) -> SubstrateState:
+        return self._state
+
+    @property
+    def input_text(self) -> str:
+        return self._state.input_text
+
+    @property
+    def pending_request(self) -> AcceptRequest | None:
+        return self._state.pending_request
+
+    @property
+    def chip(self) -> Chip | None:
+        return self._state.chip
+
+    @property
+    def translators(self) -> TranslatorTable:
+        return self._translators
+
+    @property
+    def command_names(self) -> tuple[str, ...]:
+        return self.COMMAND_NAMES
+
+    def set_input_text(self, text: str) -> None:
+        if not isinstance(text, str):
+            raise TypeError("input text must be a string")
+        self._state.input_text = text
+
+    @staticmethod
+    def _split_input(line: str) -> tuple[str, str | None] | None:
+        start = 0
+        while start < len(line) and line[start].isspace():
+            start += 1
+        if start == len(line):
+            return None
+        end = start
+        while end < len(line) and not line[end].isspace():
+            end += 1
+        command = line[start:end]
+        argument_start = end
+        while argument_start < len(line) and line[argument_start].isspace():
+            argument_start += 1
+        argument = line[argument_start:] if argument_start < len(line) else None
+        return command, argument
+
+    def submit(self, line: str | None = None) -> None:
+        if line is not None:
+            self.set_input_text(line)
+        parsed = self._split_input(self._state.input_text)
+        if parsed is None:
+            return
+        command_name, raw_argument = parsed
+        if command_name not in self.COMMAND_NAMES:
+            try:
+                self._append_error(
+                    f"unknown command: {escape_display(command_name)}."
+                )
+            finally:
+                self._clear_attempt()
+            return
+        if command_name == "ps" and raw_argument is not None:
+            try:
+                self._append_error(
+                    f"{escape_display(command_name)} does not take an argument."
+                )
+            finally:
+                self._clear_attempt()
+            return
+        if raw_argument is None:
+            if command_name == "ls":
+                item = TypedDomainValue(
+                    self._types.directory, DirectoryRef(self._cwd)
+                )
+                self._run_typed(command_name, item)
+            elif command_name == "ps":
+                self._run_without_argument(command_name)
+            else:
+                self._begin_accept(command_name)
+            return
+
+        parser = {
+            "ls": parse_directory,
+            "show": parse_show,
+            "kill": parse_process,
+            "cd": parse_directory,
+            "rm": parse_file,
+        }[command_name]
+        try:
+            item = parser(raw_argument, self._cwd, self._types, self._filesystem)
+        except DomainParseError as error:
+            try:
+                self._append_error(str(error))
+            finally:
+                self._clear_attempt()
+            return
+        self._run_typed(command_name, item)
+
+    def _acceptable_types(self, command_name: str) -> frozenset[PresentationType]:
+        accepted = {
+            "cd": (self._types.directory,),
+            "rm": (self._types.file,),
+            "kill": (self._types.process,),
+            "show": (
+                self._types.file,
+                self._types.directory,
+                self._types.process,
+            ),
+        }
+        return frozenset(accepted[command_name])
+
+    def _begin_accept(self, command_name: str) -> None:
+        self._state.input_text = command_name
+        self._state.chip = None
+
+        def continue_with(chip: Chip) -> None:
+            self._finish_chip(command_name, chip)
+
+        self._state.begin_accept(
+            AcceptRequest(
+                command_name,
+                self._acceptable_types(command_name),
+                continue_with,
+            )
+        )
+
+    def _label_for(self, item: TypedDomainValue) -> str:
+        if type(item.value) in {FileRef, DirectoryRef}:
+            return escape_display(item.value.path)
+        if type(item.value) is ProcessRef:
+            return str(item.value.pid)
+        raise TypeError("command chips require a path or process reference")
+
+    def _run_typed(self, command_name: str, item: TypedDomainValue) -> None:
+        chip = Chip(item.presentation_type, item.value, self._label_for(item))
+        self._state.chip = chip
+        self._finish_chip(command_name, chip)
+
+    def _run_without_argument(self, command_name: str) -> None:
+        try:
+            self._execute(command_name, None)
+        finally:
+            self._clear_attempt()
+
+    def _finish_chip(self, command_name: str, chip: Chip) -> None:
+        try:
+            self._execute(command_name, chip.value)
+        finally:
+            self._clear_attempt()
+
+    def _clear_attempt(self) -> None:
+        self._state.input_text = ""
+        self._state.pending_request = None
+        self._state.chip = None
+
+    def cancel(self) -> None:
+        self._state.input_text = ""
+        self._state.cancel()
+
+    def backspace_chip(self) -> bool:
+        return self._state.backspace()
+
+    def select(self, presentation: Presentation | None, label: str = "") -> bool:
+        if presentation is None:
+            return False
+        if self._state.pending_request is not None:
+            return self._state.select_presentation(presentation, label)
+        translator = self._translators.lookup(presentation.presentation_type)
+        if translator is None:
+            return False
+        translator(presentation.value)
+        return True
+
+    def select_presentation(
+        self, presentation: Presentation | None, label: str = ""
+    ) -> bool:
+        return self.select(presentation, label)
+
+    def _translate_show(self, value: object) -> None:
+        self._command_show(value)
+
+    def _execute(self, command_name: str, value: object | None) -> None:
+        if command_name == "ls":
+            self._command_ls(value)
+        elif command_name == "ps":
+            self._command_ps()
+        elif command_name == "show":
+            self._command_show(value)
+        elif command_name == "kill":
+            self._command_kill(value)
+        elif command_name == "cd":
+            self._command_cd(value)
+        elif command_name == "rm":
+            self._command_rm(value)
+        else:
+            raise AssertionError(f"unregistered command {command_name!r}")
+
+    def _append_text(self, text: str) -> None:
+        self._history.append(
+            self._contexts.standalone.present_row(text, self._types.text)
+        )
+
+    def _append_error(self, message: str) -> None:
+        self._history.append(
+            self._contexts.standalone.present_row(message, self._types.error)
+        )
+
+    def _append_host_error(
+        self, action: str, subject: str | int, error: BaseException
+    ) -> None:
+        self._append_error(compose_failure_message(action, subject, error))
+
+    def _classify_current(self, path: str) -> TypedDomainValue:
+        try:
+            followed = self._filesystem.stat(path)
+        except OSError as stat_error:
+            if stat_error.errno not in _ABSENT_OR_UNRESOLVED:
+                raise
+            unlinked = self._filesystem.lstat(path)
+            if stat_module.S_ISLNK(unlinked.st_mode):
+                return TypedDomainValue(self._types.file, FileRef(path))
+            raise stat_error
+        if stat_module.S_ISDIR(followed.st_mode):
+            return TypedDomainValue(self._types.directory, DirectoryRef(path))
+        return TypedDomainValue(self._types.file, FileRef(path))
+
+    def _require_directory(self, reference: DirectoryRef) -> os.stat_result:
+        result = self._filesystem.stat(reference.path)
+        if not stat_module.S_ISDIR(result.st_mode):
+            raise NotADirectoryError("Not a directory")
+        return result
+
+    def _command_ls(self, value: object | None) -> None:
+        if type(value) is not DirectoryRef:
+            raise TypeError("ls requires DirectoryRef")
+        try:
+            self._require_directory(value)
+            children: list[TypedDomainValue] = []
+            for entry in self._filesystem.iter_directory(value.path):
+                if entry.name in {".", ".."}:
+                    continue
+                child_path = self._filesystem.abspath(entry.path)
+                children.append(self._classify_current(child_path))
+            children.sort(key=lambda item: path_sort_key(item.value))
+        except OSError as error:
+            self._append_host_error("cannot list", value.path, error)
+            return
+
+        if not children:
+            self._append_text(format_empty_directory(value))
+            return
+        for item in children:
+            self._history.append(
+                path_listing_row(item, self._types, self._contexts.listing)
+            )
+
+    def _command_ps(self) -> None:
+        try:
+            records = sorted(
+                (
+                    record
+                    for record in self._processes.list_for_uid(
+                        self._processes.own_uid
+                    )
+                    if record.real_uid == self._processes.own_uid
+                ),
+                key=lambda record: record.pid,
+            )
+        except OSError as error:
+            message = f"cannot list processes: {escape_display(str(error))}"
+            self._append_error(message if message.endswith(".") else f"{message}.")
+            return
+        for record in records:
+            self._history.append(
+                process_listing_row(
+                    ProcessRef(record.pid),
+                    record.state,
+                    record.command,
+                    self._types,
+                    self._contexts.listing,
+                )
+            )
+
+    def _command_show(self, value: object | None) -> None:
+        if type(value) is ProcessRef:
+            try:
+                record = self._processes.inspect(value.pid)
+            except OSError as error:
+                self._append_host_error(
+                    "cannot show process", value.pid, error
+                )
+                return
+            self._append_text(
+                format_process_detail(value, record.command, record.state)
+            )
+            return
+        if type(value) not in {FileRef, DirectoryRef}:
+            raise TypeError("show requires a path or process reference")
+        self._show_path(value.path)
+
+    def _show_path(self, path: str) -> None:
+        try:
+            unlinked = self._filesystem.lstat(path)
+            is_link = stat_module.S_ISLNK(unlinked.st_mode)
+            link_target = self._filesystem.readlink(path) if is_link else None
+            try:
+                followed = self._filesystem.stat(path)
+            except OSError as error:
+                if is_link and error.errno in _ABSENT_OR_UNRESOLVED:
+                    detail = format_path_detail(
+                        FileRef(path),
+                        size=unlinked.st_size,
+                        mtime=unlinked.st_mtime,
+                        symlink_target=link_target,
+                        broken_symlink=True,
+                    )
+                    self._append_text(detail)
+                    return
+                raise
+            if stat_module.S_ISDIR(followed.st_mode):
+                detail = format_path_detail(
+                    DirectoryRef(path), symlink_target=link_target
+                )
+            else:
+                detail = format_path_detail(
+                    FileRef(path),
+                    size=followed.st_size,
+                    mtime=followed.st_mtime,
+                    symlink_target=link_target,
+                )
+        except OSError as error:
+            self._append_host_error("cannot show", path, error)
+            return
+        self._append_text(detail)
+
+    def _command_cd(self, value: object | None) -> None:
+        if type(value) is not DirectoryRef:
+            raise TypeError("cd requires DirectoryRef")
+        try:
+            self._require_directory(value)
+        except OSError as error:
+            self._append_host_error(
+                "cannot change directory to", value.path, error
+            )
+            return
+        self._cwd = value.path
+
+    def _command_rm(self, value: object | None) -> None:
+        if type(value) is not FileRef:
+            raise TypeError("rm requires FileRef")
+        path = value.path
+        try:
+            unlinked = self._filesystem.lstat(path)
+            is_link = stat_module.S_ISLNK(unlinked.st_mode)
+            try:
+                followed = self._filesystem.stat(path)
+            except OSError as error:
+                if not (is_link and error.errno in _ABSENT_OR_UNRESOLVED):
+                    raise
+                followed = None
+            if followed is not None and stat_module.S_ISDIR(followed.st_mode):
+                self._append_error(
+                    f"refusing to remove directory {escape_display(path)}."
+                )
+                return
+            self._filesystem.unlink(path)
+        except OSError as error:
+            self._append_host_error("cannot remove", path, error)
+            return
+        self._append_text(format_removed_file(value))
+
+    def _command_kill(self, value: object | None) -> None:
+        if type(value) is not ProcessRef:
+            raise TypeError("kill requires ProcessRef")
+        pid = value.pid
+        if pid < 2 or pid == self._processes.own_pid:
+            self._append_error(f"refusing to signal process {pid}.")
+            return
+        try:
+            self._processes.inspect(pid)
+            self._processes.send_sigterm(pid)
+        except OSError as error:
+            self._append_host_error("cannot signal process", pid, error)
+            return
+        self._append_text(format_signal_result(value))
+
+
+def make_production_listener() -> HeadlessListener:
+    """Compose the production headless listener without starting a UI."""
+
+    return HeadlessListener.production()
+
+
+__all__ = [
+    "FilesystemEntry",
+    "FilesystemService",
+    "HeadlessListener",
+    "InspectedProcess",
+    "LinuxProcessService",
+    "ProcessInspectionError",
+    "ProcessService",
+    "ProductionFilesystem",
+    "RootedFilesystem",
+    "make_production_listener",
+    "process_state_word",
+]
