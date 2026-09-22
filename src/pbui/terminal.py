@@ -1,4 +1,4 @@
-"""Passive Textual drawing and layout for the presentation listener.
+"""Textual drawing, interaction, and lifecycle for the presentation listener.
 
 This is deliberately the package's only Textual boundary.  It adapts the
 headless listener without moving presentation identity, wrapping, or hit
@@ -13,7 +13,8 @@ from rich.style import Style
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
-from textual.geometry import Size
+from textual.binding import Binding
+from textual.geometry import Offset, Size
 from textual.screen import Screen
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
@@ -28,6 +29,14 @@ from pbui.text import Layout, layout
 
 ELLIPSIS = "…"
 _UNSET = object()
+
+
+def filter_one_row(text: str) -> str:
+    """Keep only printable code points suitable for the one-row editor."""
+
+    if not isinstance(text, str):
+        raise TypeError("editor text must be a string")
+    return "".join(character for character in text if character.isprintable())
 
 
 def _character_width(character: str) -> int:
@@ -358,6 +367,8 @@ def build_history_text(
 class HistorySurface(ScrollView):
     """The sole scrollable widget, drawing the listener's complete history."""
 
+    can_focus = False
+
     DEFAULT_CSS = """
     HistorySurface {
         width: 100%;
@@ -373,6 +384,7 @@ class HistorySurface(ScrollView):
         self.listener = listener
         self.current_layout = layout(listener.history, 1)
         self.hovered_presentation: Presentation | None = None
+        self._pointer_offset: Offset | None = None
         self.history_text = build_history_text(listener, self.current_layout)
         self._line_texts: tuple[Text, ...] = ()
         self._logical_rows = listener.history.rows
@@ -441,6 +453,60 @@ class HistorySurface(ScrollView):
         maximum = max(0, len(self.current_layout.rows) - viewport_height)
         return min(max(0, row), maximum)
 
+    def _offset_is_in_content(self, offset: Offset) -> bool:
+        if not self.is_mounted:
+            return False
+        region = self.scrollable_content_region
+        return 0 <= offset.x < region.width and 0 <= offset.y < region.height
+
+    def content_offset_from_event(self, event: events.MouseEvent) -> Offset | None:
+        """Translate a mouse event to the drawable content viewport."""
+
+        offset = event.get_content_offset(self)
+        if offset is None or not self._offset_is_in_content(offset):
+            return None
+        return offset
+
+    def _hit_at_offset(
+        self, offset: Offset, *, scroll_y: int | None = None
+    ) -> Presentation | None:
+        if not self._offset_is_in_content(offset):
+            return None
+        physical_row = offset.y + (
+            int(self.scroll_y) if scroll_y is None else scroll_y
+        )
+        return self.current_layout.hit_test(offset.x, physical_row)
+
+    def presentation_at_content_offset(
+        self, x: int, y: int
+    ) -> Presentation | None:
+        """Return a fresh pure-layout hit for a viewport content coordinate."""
+
+        self.synchronize()
+        return self._hit_at_offset(Offset(int(x), int(y)))
+
+    @property
+    def pointer_offset(self) -> Offset | None:
+        """The most recent pointer coordinate inside the content viewport."""
+
+        return self._pointer_offset
+
+    def _recompute_pointer_hover(self, *, scroll_y: int | None = None) -> None:
+        if self._pointer_offset is None:
+            return
+        if not self._offset_is_in_content(self._pointer_offset):
+            self.clear_pointer()
+            return
+        self.set_hovered_presentation(
+            self._hit_at_offset(self._pointer_offset, scroll_y=scroll_y)
+        )
+
+    def clear_pointer(self) -> None:
+        """Forget pointer coordinates and clear all hover-derived drawing."""
+
+        self._pointer_offset = None
+        self.set_hovered_presentation(None)
+
     def synchronize(self, *, force: bool = False) -> bool:
         """Relayout changed history/width and refresh all derived drawing state."""
 
@@ -465,13 +531,6 @@ class HistorySurface(ScrollView):
         self._content_width = content_width
         self._pending_request = pending_request
 
-        retained = set(self.current_layout.presentations)
-        if self.hovered_presentation not in retained:
-            self.hovered_presentation = None
-        self.history_text = build_history_text(
-            self.listener, self.current_layout, self.hovered_presentation
-        )
-        self._update_line_texts()
         self.virtual_size = Size(content_width, len(self.current_layout.rows))
 
         target_scroll = fallback_scroll
@@ -479,6 +538,22 @@ class HistorySurface(ScrollView):
             target_scroll = self._anchored_scroll_y(anchor, fallback_scroll)
         target_scroll = self._clamp_scroll_row(target_scroll)
         self.scroll_to(y=target_scroll, animate=False, force=True, immediate=True)
+
+        retained = set(self.current_layout.presentations)
+        if self._pointer_offset is not None:
+            if self._offset_is_in_content(self._pointer_offset):
+                self.hovered_presentation = self._hit_at_offset(
+                    self._pointer_offset, scroll_y=target_scroll
+                )
+            else:
+                self._pointer_offset = None
+                self.hovered_presentation = None
+        elif self.hovered_presentation not in retained:
+            self.hovered_presentation = None
+        self.history_text = build_history_text(
+            self.listener, self.current_layout, self.hovered_presentation
+        )
+        self._update_line_texts()
         self.refresh(layout=True)
         self._refresh_documentation()
         return True
@@ -510,6 +585,8 @@ class HistorySurface(ScrollView):
 
         target = self._clamp_scroll_row(int(row))
         self.scroll_to(y=target, animate=False, force=True, immediate=True)
+        self._recompute_pointer_hover(scroll_y=target)
+        self._refresh_documentation()
 
     def _refresh_documentation(self) -> None:
         if self.is_mounted and isinstance(self.screen, ListenerScreen):
@@ -522,6 +599,63 @@ class HistorySurface(ScrollView):
 
     def on_resize(self, _event: events.Resize) -> None:
         self.synchronize()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        self.synchronize()
+        self._pointer_offset = self.content_offset_from_event(event)
+        self.set_hovered_presentation(
+            None
+            if self._pointer_offset is None
+            else self._hit_at_offset(self._pointer_offset)
+        )
+        event.stop()
+
+    def on_leave(self, event: events.Leave) -> None:
+        if event.node is self:
+            self.clear_pointer()
+
+    def on_click(self, event: events.Click) -> None:
+        event.prevent_default().stop()
+        if event.button != 1 or event.chain != 1:
+            return
+
+        self.synchronize()
+        self._pointer_offset = self.content_offset_from_event(event)
+        presentation = (
+            None
+            if self._pointer_offset is None
+            else self._hit_at_offset(self._pointer_offset)
+        )
+        self.set_hovered_presentation(presentation)
+        label = ""
+        kind = _domain_kind(self.listener, presentation)
+        if presentation is not None and kind in {"File", "Directory"}:
+            label = _name(presentation)
+        elif presentation is not None and kind == "Process":
+            label = _pid(presentation)
+
+        revision = self.listener.history.revision
+        selected = self.listener.select(presentation, label)
+        if isinstance(self.screen, ListenerScreen):
+            self.screen.synchronize(
+                reveal_newest=(
+                    selected and self.listener.history.revision != revision
+                )
+            )
+
+    def _scroll_wheel(self, event: events.MouseEvent, delta: int) -> None:
+        event.prevent_default().stop()
+        self.synchronize()
+        self._pointer_offset = self.content_offset_from_event(event)
+        self.scroll_to_row(int(self.scroll_y) + delta)
+        if self._pointer_offset is None:
+            self.set_hovered_presentation(None)
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self._scroll_wheel(event, -3)
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self._scroll_wheel(event, 3)
 
     def render(self) -> Text:
         return self.history_text
@@ -586,7 +720,7 @@ class DocumentationLine(Widget):
 
 
 class CommandInput(Widget):
-    """Passive one-row drawing for prompt, editor cursor, and atomic chip."""
+    """One-row editor drawing prompt, editable text, cursor, and atomic chip."""
 
     can_focus = True
 
@@ -616,6 +750,84 @@ class CommandInput(Widget):
 
     def set_cursor_position(self, position: int) -> None:
         self.cursor_position = position
+
+    def clamp_cursor(self) -> None:
+        self.cursor_position = self._cursor_position
+
+    def _synchronize(self, *, reveal_newest: bool = False) -> None:
+        if self.is_mounted and isinstance(self.screen, ListenerScreen):
+            self.screen.synchronize(reveal_newest=reveal_newest)
+        else:
+            self.refresh()
+
+    def _set_edited_text(self, text: str, cursor_position: int) -> None:
+        self.listener.set_input_text(text)
+        self.cursor_position = cursor_position
+        self._synchronize()
+
+    def _insert(self, inserted: str) -> None:
+        position = self.cursor_position
+        text = self.listener.input_text
+        self._set_edited_text(
+            text[:position] + inserted + text[position:],
+            position + len(inserted),
+        )
+
+    def on_paste(self, event: events.Paste) -> None:
+        event.prevent_default().stop()
+        inserted = filter_one_row(event.text)
+        if inserted:
+            self._insert(inserted)
+
+    def on_key(self, event: events.Key) -> None:
+        key = event.key
+        position = self.cursor_position
+        text = self.listener.input_text
+
+        if key == "left":
+            self.cursor_position = position - 1
+            self._synchronize()
+        elif key == "right":
+            self.cursor_position = position + 1
+            self._synchronize()
+        elif key == "home":
+            self.cursor_position = 0
+            self._synchronize()
+        elif key == "end":
+            self.cursor_position = len(text)
+            self._synchronize()
+        elif key == "backspace":
+            if (
+                self.listener.chip is not None
+                and position == len(text)
+                and self.listener.backspace_chip()
+            ):
+                self._synchronize()
+            elif position > 0:
+                self._set_edited_text(
+                    text[: position - 1] + text[position:], position - 1
+                )
+            else:
+                self._synchronize()
+        elif key == "delete":
+            if position < len(text):
+                self._set_edited_text(text[:position] + text[position + 1 :], position)
+            else:
+                self._synchronize()
+        elif key == "enter":
+            revision = self.listener.history.revision
+            self.listener.submit(self.listener.input_text)
+            self.cursor_position = len(self.listener.input_text)
+            self._synchronize(
+                reveal_newest=self.listener.history.revision != revision
+            )
+        else:
+            inserted = filter_one_row(event.character or "")
+            if not inserted:
+                return
+            self._insert(inserted)
+
+        event.prevent_default().stop()
 
     @property
     def prompt(self) -> str:
@@ -708,16 +920,39 @@ class ListenerScreen(Screen[None]):
     def on_mount(self) -> None:
         self.command_input.focus()
 
-    def synchronize(self) -> None:
+    def synchronize(
+        self, *, reveal_newest: bool = False, clear_hover: bool = False
+    ) -> None:
+        if clear_hover:
+            self.history_surface.clear_pointer()
         self.history_surface.synchronize()
+        if reveal_newest:
+            self.history_surface.scroll_to_row(
+                len(self.history_surface.current_layout.rows)
+            )
+        elif self.history_surface.pointer_offset is not None:
+            self.history_surface._recompute_pointer_hover()
         self.documentation_line.set_presentation(
             self.history_surface.hovered_presentation
         )
+        self.command_input.clamp_cursor()
         self.command_input.refresh()
 
 
-class PbuiApp(App[None]):
-    """A passive Textual application adapting one injected listener."""
+class PbuiApp(App[None], inherit_bindings=False):
+    """The Textual application adapting one injected listener."""
+
+    ENABLE_COMMAND_PALETTE = False
+    BINDINGS = [
+        Binding(
+            "ctrl+g,escape",
+            "cancel_listener",
+            show=False,
+            priority=True,
+        ),
+        Binding("ctrl+d", "exit_if_empty", show=False, priority=True),
+        Binding("ctrl+c", "exit_any_state", show=False, priority=True),
+    ]
 
     def __init__(self, listener: HeadlessListener) -> None:
         if not isinstance(listener, HeadlessListener):
@@ -728,6 +963,34 @@ class PbuiApp(App[None]):
     def get_default_screen(self) -> ListenerScreen:
         return ListenerScreen(self.listener)
 
+    def action_cancel_listener(self) -> None:
+        self.listener.cancel()
+        screen = self.screen
+        if isinstance(screen, ListenerScreen):
+            screen.command_input.cursor_position = 0
+            screen.synchronize(clear_hover=True)
+
+    def action_exit_if_empty(self) -> None:
+        if (
+            self.listener.input_text == ""
+            and self.listener.chip is None
+            and self.listener.pending_request is None
+        ):
+            self.exit()
+
+    def action_exit_any_state(self) -> None:
+        self.exit()
+
+
+def main() -> None:
+    """Compose and run the production listener through Textual's lifecycle."""
+
+    try:
+        listener = HeadlessListener.production()
+        PbuiApp(listener).run()
+    except KeyboardInterrupt:
+        return
+
 
 __all__ = [
     "CommandInput",
@@ -737,8 +1000,10 @@ __all__ = [
     "PbuiApp",
     "build_history_text",
     "display_width",
+    "filter_one_row",
     "format_documentation",
     "format_prompt",
+    "main",
     "presentation_style",
     "truncate_display",
 ]
