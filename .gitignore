@@ -1,0 +1,26 @@
+# uv environment
+.venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+
+# Packaging output
+build/
+dist/
+*.egg-info/
+
+# OS and editor files
+.DS_Store
+*.swp
