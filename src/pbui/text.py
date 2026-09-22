@@ -51,6 +51,7 @@ class HistoryRow:
 
     fragments: tuple[Fragment, ...]
     presentations: tuple[Presentation, ...] = field(default_factory=tuple)
+    listing_owner: object | None = field(default=None, compare=False)
 
     @property
     def presentation_ids(self) -> tuple[int, ...]:

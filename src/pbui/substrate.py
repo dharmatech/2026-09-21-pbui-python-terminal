@@ -8,7 +8,7 @@ therefore based on token identity rather than Python value classes.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeAlias
 
@@ -137,17 +137,14 @@ class PresentationHistory:
         return len(self._rows)
 
     def append(self, row: HistoryRow) -> None:
-        row_presentations = {item.id: item for item in row.presentations}
-        referred_ids = set(row.presentation_ids)
-        if referred_ids != set(row_presentations):
-            raise ValueError(
-                "a history row must carry exactly the presentations its drawing refers to"
-            )
-
+        row_presentations = self._validate_row(row)
+        self._validate_owner_blocks((*self._rows, row))
         for presentation_id, presentation in row_presentations.items():
             retained = self._presentations.get(presentation_id)
             if retained is not None and retained is not presentation:
                 raise ValueError(f"presentation id {presentation_id} is not unique")
+
+        for presentation_id, presentation in row_presentations.items():
             self._presentations[presentation_id] = presentation
             self._reference_counts[presentation_id] = (
                 self._reference_counts.get(presentation_id, 0) + 1
@@ -158,6 +155,50 @@ class PresentationHistory:
             self._discard_oldest()
         self._revision += 1
 
+    def replace_listing_rows(
+        self,
+        listing_identity: object,
+        replacement_rows: Iterable[HistoryRow],
+    ) -> None:
+        """Atomically replace one retained listing block at its current position."""
+
+        if listing_identity is None:
+            raise ValueError("a listing identity must be non-None")
+
+        retained_rows = tuple(self._rows)
+        first, stop = self._find_owner_block(retained_rows, listing_identity)
+        replacements = tuple(replacement_rows)
+        if not replacements:
+            raise ValueError("replacement rows must not be empty")
+        for row in replacements:
+            row_presentations = self._validate_row(row)
+            if row.listing_owner is not listing_identity:
+                raise ValueError(
+                    "every replacement row must have the target listing owner"
+                )
+            for presentation_id, presentation in row_presentations.items():
+                retained = self._presentations.get(presentation_id)
+                if retained is not None and retained is not presentation:
+                    raise ValueError(
+                        f"presentation id {presentation_id} is not unique"
+                    )
+
+        candidate_rows = retained_rows[:first] + replacements + retained_rows[stop:]
+        self._validate_owner_blocks(candidate_rows)
+        candidate_presentations, _ = self._build_retention(candidate_rows)
+
+        final_rows = candidate_rows[-self._max_rows :]
+        final_presentations, final_reference_counts = self._build_retention(final_rows)
+
+        presentations_to_clear = dict(self._presentations)
+        presentations_to_clear.update(candidate_presentations)
+        self._rows = deque(final_rows)
+        self._presentations = final_presentations
+        self._reference_counts = final_reference_counts
+        for presentation in presentations_to_clear.values():
+            presentation.replace_intervals(())
+        self._revision += 1
+
     def get_presentation(self, presentation_id: int) -> Presentation | None:
         return self._presentations.get(presentation_id)
 
@@ -166,6 +207,80 @@ class PresentationHistory:
             return self._presentations[presentation_id]
         except KeyError:
             raise KeyError(f"presentation {presentation_id!r} is not retained") from None
+
+    @staticmethod
+    def _validate_row(row: HistoryRow) -> dict[int, Presentation]:
+        from pbui.text import HistoryRow
+
+        if not isinstance(row, HistoryRow):
+            raise TypeError("history entries must be HistoryRow values")
+
+        row_presentations: dict[int, Presentation] = {}
+        for presentation in row.presentations:
+            if not isinstance(presentation, Presentation):
+                raise TypeError("row presentations must be Presentation values")
+            previous = row_presentations.get(presentation.id)
+            if previous is not None and previous is not presentation:
+                raise ValueError(f"presentation id {presentation.id} is not unique")
+            row_presentations[presentation.id] = presentation
+
+        referred_ids = set(row.presentation_ids)
+        if referred_ids != set(row_presentations):
+            raise ValueError(
+                "a history row must carry exactly the presentations its drawing refers to"
+            )
+        return row_presentations
+
+    @classmethod
+    def _build_retention(
+        cls, rows: Iterable[HistoryRow]
+    ) -> tuple[dict[int, Presentation], dict[int, int]]:
+        presentations: dict[int, Presentation] = {}
+        reference_counts: dict[int, int] = {}
+        for row in rows:
+            for presentation_id, presentation in cls._validate_row(row).items():
+                retained = presentations.get(presentation_id)
+                if retained is not None and retained is not presentation:
+                    raise ValueError(f"presentation id {presentation_id} is not unique")
+                presentations[presentation_id] = presentation
+                reference_counts[presentation_id] = (
+                    reference_counts.get(presentation_id, 0) + 1
+                )
+        return presentations, reference_counts
+
+    @staticmethod
+    def _validate_owner_blocks(rows: Iterable[HistoryRow]) -> None:
+        closed_owners: list[object] = []
+        active_owner: object | None = None
+        for row in rows:
+            owner = row.listing_owner
+            if owner is active_owner:
+                continue
+            if active_owner is not None:
+                closed_owners.append(active_owner)
+            active_owner = owner
+            if owner is not None and any(owner is item for item in closed_owners):
+                raise ValueError("rows for one listing owner must be contiguous")
+
+    @staticmethod
+    def _find_owner_block(
+        rows: Sequence[HistoryRow], listing_identity: object
+    ) -> tuple[int, int]:
+        first: int | None = None
+        stop = 0
+        left_block = False
+        for index, row in enumerate(rows):
+            if row.listing_owner is listing_identity:
+                if left_block:
+                    raise ValueError("rows for the target listing are not contiguous")
+                if first is None:
+                    first = index
+                stop = index + 1
+            elif first is not None:
+                left_block = True
+        if first is None:
+            raise KeyError("the target listing has no retained rows")
+        return first, stop
 
     def _discard_oldest(self) -> None:
         oldest = self._rows.popleft()
