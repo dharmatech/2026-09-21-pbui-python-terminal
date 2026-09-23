@@ -54,6 +54,7 @@ from pbui.substrate import (
     TranslatorTable,
 )
 from pbui.text import HistoryRow
+from pbui.repl import PythonEvaluator, ValueClasses, ValueTranslator
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +389,14 @@ class HeadlessListener:
         self._pending_substring_listing: DirectoryListing | ProcessListing | None = (
             None
         )
+        self._repl = PythonEvaluator(
+            self._history,
+            self._contexts.standalone,
+            self._types.value,
+            self._append_text,
+            self._append_error,
+            self.COMMAND_NAMES,
+        )
         self._translators = TranslatorTable()
         for presentation_type in (
             self._types.file,
@@ -466,6 +475,42 @@ class HeadlessListener:
         return self._translators
 
     @property
+    def python_namespace(self) -> dict[str, object]:
+        return self._repl.namespace
+
+    @property
+    def pending_python_source(self) -> str:
+        return self._repl.pending_source
+
+    @property
+    def python_classes(self) -> ValueClasses:
+        return self._repl.classes
+
+    def register_python_class(
+        self,
+        cls: type,
+        printer: Callable[[object], str],
+        translators: Iterable[ValueTranslator] = (),
+    ) -> None:
+        self._repl.classes.register(cls, printer, translators)
+
+    def python_translators_for(
+        self, presentation: Presentation
+    ) -> tuple[ValueTranslator, ...]:
+        if presentation.presentation_type is not self._types.value:
+            return ()
+        return self._repl.classes.translators_for(presentation.value)
+
+    def invoke_python_translator(
+        self, presentation: Presentation, index: int
+    ) -> Presentation | None:
+        return self._repl.invoke_translator(presentation, index)
+
+    def cancel_python_continuation(self) -> None:
+        self._repl.cancel()
+        self._state.input_text = ""
+
+    @property
     def command_names(self) -> tuple[str, ...]:
         return self.COMMAND_NAMES
 
@@ -497,7 +542,28 @@ class HeadlessListener:
         if self._pending_substring_listing is not None:
             self._finish_substring_accept()
             return
-        parsed = self._split_input(self._state.input_text)
+        submitted = self._state.input_text
+        if self._repl.pending_source:
+            self._state.input_text = ""
+            self._repl.submit(submitted)
+            return
+        if not submitted.strip():
+            return
+        decision = submitted.lstrip()
+        if decision.startswith(":"):
+            command_line = decision[1:]
+            if command_line.startswith(" "):
+                command_line = command_line[1:]
+            if not command_line.strip():
+                self._state.input_text = ""
+                return
+        elif self._state.pending_request is not None:
+            command_line = submitted
+        else:
+            self._state.input_text = ""
+            self._repl.submit(submitted)
+            return
+        parsed = self._split_input(command_line)
         if parsed is None:
             return
         command_name, raw_argument = parsed
@@ -608,6 +674,7 @@ class HeadlessListener:
         self._pending_substring_listing = None
 
     def cancel(self) -> None:
+        self._repl.cancel()
         self._state.input_text = ""
         self._state.cancel()
         self._pending_substring_listing = None

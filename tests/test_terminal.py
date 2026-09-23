@@ -260,14 +260,14 @@ async def test_one_literal_history_renderable_uses_content_width_and_no_item_wid
     (tmp_path / "[bold]literal").write_text("x")
     (tmp_path / "directory").mkdir()
     listener = make_listener(tmp_path)
-    listener.submit("ls")
-    listener.submit("ps")
+    listener.submit(": ls")
+    listener.submit(": ps")
     listener.history.append(
         listener.drawing_contexts.standalone.present_row(
             "plain [not markup]", listener.types.text
         )
     )
-    listener.submit("unknown")
+    listener.submit(": unknown")
     app = PbuiApp(listener)
 
     async with app.run_test(size=(28, 9)) as pilot:
@@ -347,7 +347,7 @@ async def test_large_wrapped_process_history_rebuilds_only_hover_rows(
     app = PbuiApp(listener)
 
     async with app.run_test(size=(36, 9)) as pilot:
-        listener.submit("ps")
+        listener.submit(": ps")
         surface = app.screen.history_surface
         surface.synchronize(force=True)
         await pilot.pause()
@@ -485,7 +485,7 @@ def test_visual_states_follow_exact_accept_types(tmp_path, command, acceptable):
     assert error.color is not None and error.color.name == "red"
     assert hovered.reverse
 
-    listener.submit(command)
+    listener.submit(": " + command)
     for name, presentation in presentations.items():
         style = presentation_style(listener, presentation, presentation)
         if name in acceptable:
@@ -521,7 +521,7 @@ def test_listing_semantic_colors_headers_and_cached_state_precedence(tmp_path):
     ]
     listener = _process_listener(tmp_path, records)
     process_service = listener.processes
-    listener.submit("ps")
+    listener.submit(": ps")
     listing = listener.history.rows[0].listing_owner
     assert listing.header_presentation is not None
 
@@ -557,7 +557,7 @@ def test_listing_semantic_colors_headers_and_cached_state_precedence(tmp_path):
     assert synthetic_style.color is not None
     assert synthetic_style.color.name == "default"
 
-    listener.submit("kill")
+    listener.submit(": kill")
     acceptable = presentation_style(listener, by_pid[2], by_pid[2])
     assert acceptable.color is not None
     assert acceptable.color.triplet.hex == "#00d787"
@@ -575,7 +575,7 @@ def test_directory_colors_and_whole_process_row_styling(tmp_path):
     (tmp_path / "file").write_text("payload")
     (tmp_path / "directory").mkdir()
     listener = make_listener(tmp_path)
-    listener.submit("ls")
+    listener.submit(": ls")
     directory_listing = listener.history.rows[0].listing_owner
     by_value_type = {
         type(presentation.value): presentation
@@ -598,7 +598,7 @@ def test_directory_colors_and_whole_process_row_styling(tmp_path):
         [InspectedProcess(7, 1000, "sleeping", "x" * 80)],
         displayed_user="a-user-name-that-truncates",
     )
-    process_listener.submit("ps")
+    process_listener.submit(": ps")
     process_listing = process_listener.history.rows[0].listing_owner
     presentation = process_listing.member_presentations[0]
     current_layout = layout(process_listener.history, 120)
@@ -675,7 +675,7 @@ def test_documentation_formatter_covers_normative_table(tmp_path):
     pointers = [None, item["File"], item["Directory"], item["Process"], item["Text"], item["Error"]]
     for command, expected in cases.items():
         listener.cancel()
-        listener.submit(command)
+        listener.submit(": " + command)
         assert [format_documentation(listener, pointer) for pointer in pointers] == expected
 
     counterfeit = Presentation(30_000, PresentationType("File"), FileRef("/tmp/x"))
@@ -688,8 +688,8 @@ def test_documentation_formatter_covers_normative_table(tmp_path):
 def test_listing_header_documentation_and_all_accept_refusals(tmp_path):
     (tmp_path / "file").write_text("payload")
     listener = make_listener(tmp_path)
-    listener.submit("ls")
-    listener.submit("ps")
+    listener.submit(": ls")
+    listener.submit(": ps")
     directory_listing = listener.history.rows[0].listing_owner
     process_listing = next(
         row.listing_owner
@@ -727,7 +727,7 @@ def test_listing_header_documentation_and_all_accept_refusals(tmp_path):
     }
     for command, sentences in expected.items():
         listener.cancel()
-        listener.submit(command)
+        listener.submit(": " + command)
         assert tuple(format_documentation(listener, header) for header in headers) == (
             sentences
         )
@@ -745,7 +745,7 @@ def test_truncated_command_documentation_uses_cached_field_and_exact_boundaries(
         ],
         displayed_user="user-name-that-is-far-too-wide",
     )
-    listener.submit("ps")
+    listener.submit(": ps")
     listing = listener.history.rows[0].listing_owner
     by_pid = {
         presentation.value.pid: presentation
@@ -790,7 +790,7 @@ async def test_wrapped_command_field_refreshes_documentation_without_restyling(
             InspectedProcess(22, 1000, "sleeping", "short"),
         ],
     )
-    listener.submit("ps")
+    listener.submit(": ps")
     listing = listener.history.rows[0].listing_owner
     long_process, short_process = listing.member_presentations
     app = PbuiApp(listener)
@@ -888,10 +888,10 @@ def test_prompt_cursor_and_atomic_chip_are_passive_listener_drawing(tmp_path):
     assert listener.input_text == "show"
 
     listener.state.chip = None
-    listener.submit("cd child")
+    listener.submit(": cd child")
     assert command.prompt == f"pbui:{child}> "
     assert os.getcwd() != str(child)
-    listener.submit("rm")
+    listener.submit(": rm")
     assert "File" not in command.prompt
 
 
@@ -964,7 +964,7 @@ async def test_listing_replacement_keeps_outside_row_identity_at_viewport_top(tm
     for index in range(8):
         (tmp_path / f"item-{index}").write_text("data")
     listener = make_listener(tmp_path)
-    listener.submit("ls")
+    listener.submit(": ls")
     listing = listener.history.rows[0].listing_owner
     _append_plain_rows(listener, 12)
     outside = tuple(row for row in listener.history.rows if row.listing_owner is None)
@@ -1007,7 +1007,7 @@ async def test_listing_header_member_sort_filter_widen_and_missing_member_anchor
         for pid in range(1, 10)
     ]
     listener = _process_listener(tmp_path, records)
-    listener.submit("ps")
+    listener.submit(": ps")
     monkeypatch.setattr(
         listener.processes,
         "list_for_uid",
@@ -1058,7 +1058,7 @@ async def test_listing_anchor_fallbacks_after_header_and_outside_row_eviction(tm
         FixedProcesses(own_pid=-1, records={record.pid: record for record in records}),
         history_max_rows=9,
     )
-    listener.submit("ps")
+    listener.submit(": ps")
     listing = listener.history.rows[0].listing_owner
     assert listener.apply_listing_view(listing, "narrow", "worker-1")
     _append_plain_rows(listener, 7)
@@ -1085,7 +1085,7 @@ async def test_listing_anchor_fallbacks_after_header_and_outside_row_eviction(tm
     )
     _append_plain_rows(listener, 4, prefix="before")
     oldest = listener.history.rows[0]
-    listener.submit("ps")
+    listener.submit(": ps")
     listing = listener.history.rows[4].listing_owner
     assert listener.apply_listing_view(listing, "narrow", "worker-1")
     _append_plain_rows(listener, 3)
@@ -1112,7 +1112,7 @@ async def test_fully_evicted_listing_anchor_uses_first_retained_history_row(tmp_
         ),
         history_max_rows=5,
     )
-    listener.submit("ps")
+    listener.submit(": ps")
     listing = listener.history.rows[0].listing_owner
     _append_plain_rows(listener, 3)
     app = PbuiApp(listener)
@@ -1135,7 +1135,7 @@ async def test_wrapped_listing_anchor_survives_replacement_and_resizes(tmp_path)
         for pid in range(1, 10)
     ]
     listener = _process_listener(tmp_path, records)
-    listener.submit("ps")
+    listener.submit(": ps")
     listing = listener.history.rows[0].listing_owner
     _append_plain_rows(listener, 10)
     member = listing.member_presentations[1]
@@ -1175,7 +1175,7 @@ async def test_explanatory_row_anchor_and_wrapped_offset_clamp(tmp_path):
         tmp_path,
         [InspectedProcess(1, 1000, "running", "worker")],
     )
-    listener.submit("ps")
+    listener.submit(": ps")
     listing = listener.history.rows[0].listing_owner
     _append_plain_rows(listener, 12)
     app = PbuiApp(listener)
@@ -1216,7 +1216,7 @@ async def test_typed_view_and_modal_narrow_keep_anchor_but_appends_reveal_newest
         for pid in range(1, 9)
     ]
     listener = _process_listener(tmp_path, records)
-    listener.submit("ps")
+    listener.submit(": ps")
     listing = listener.history.rows[0].listing_owner
     _append_plain_rows(listener, 12)
     app = PbuiApp(listener)
@@ -1230,14 +1230,14 @@ async def test_typed_view_and_modal_narrow_keep_anchor_but_appends_reveal_newest
 
         for command_text in ("sort state", "only sleeping", "widen"):
             revision = listener.history.revision
-            listener.set_input_text(command_text)
+            listener.set_input_text(": " + command_text)
             app.screen.command_input.cursor_position = len(command_text)
             await pilot.press("enter")
             assert listener.history.revision == revision + 1
             assert member in _top_logical_row(surface).presentations
 
         revision = listener.history.revision
-        await pilot.press(*_key_names("narrow"), "enter")
+        await pilot.press(*_key_names(":narrow"), "enter")
         assert listener.pending_substring_listing is listing
         assert listener.history.revision == revision
         assert member in _top_logical_row(surface).presentations
@@ -1246,12 +1246,12 @@ async def test_typed_view_and_modal_narrow_keep_anchor_but_appends_reveal_newest
         assert listener.history.revision == revision + 1
         assert member in _top_logical_row(surface).presentations
 
-        listener.set_input_text("unknown")
+        listener.set_input_text(": unknown")
         app.screen.command_input.cursor_position = len(listener.input_text)
         await pilot.press("enter")
         assert int(surface.scroll_y) == int(surface.max_scroll_y)
         surface.scroll_to_row(_first_physical_row(surface, _top_logical_row(surface)))
-        listener.set_input_text("ps")
+        listener.set_input_text(": ps")
         app.screen.command_input.cursor_position = 2
         await pilot.press("enter")
         assert int(surface.scroll_y) == int(surface.max_scroll_y)
@@ -1265,7 +1265,7 @@ async def test_hover_and_documentation_rehit_after_view_resize_and_pointer_exit(
         InspectedProcess(2, 1000, "running", "worker-2"),
     ]
     listener = _process_listener(tmp_path, records)
-    listener.submit("ps")
+    listener.submit(": ps")
     listing = listener.history.rows[0].listing_owner
     _append_plain_rows(listener, 14)
     app = PbuiApp(listener)
@@ -1355,7 +1355,7 @@ async def test_visible_substring_accept_editor_submission_and_cancellation(tmp_p
     target = tmp_path / "target-file"
     target.write_text("payload")
     listener = make_listener(tmp_path)
-    listener.submit("ls")
+    listener.submit(": ls")
     listing = listener.history.rows[0].listing_owner
     member = next(
         presentation
@@ -1368,7 +1368,7 @@ async def test_visible_substring_accept_editor_submission_and_cancellation(tmp_p
         command = app.screen.command_input
         documentation = app.screen.documentation_line
         surface = app.screen.history_surface
-        await pilot.press(*_key_names("narrow"), "enter")
+        await pilot.press(*_key_names(":narrow"), "enter")
 
         prefix = f"pbui:{tmp_path}> narrow "
         assert listener.pending_substring_listing is listing
@@ -1427,13 +1427,13 @@ async def test_visible_substring_accept_editor_submission_and_cancellation(tmp_p
         assert not documentation.sentence.startswith("Type a substring")
 
         post_submit_revision = listener.history.revision
-        await pilot.press(*_key_names("narrow"), "enter", "q", "escape")
+        await pilot.press(*_key_names(":narrow"), "enter", "q", "escape")
         assert listener.pending_substring_listing is None
         assert listener.input_text == ""
         assert listener.history.revision == post_submit_revision
         assert command.display_text == f"pbui:{tmp_path}> "
 
-        await pilot.press(*_key_names("narrow"), "enter", "z", "ctrl+g")
+        await pilot.press(*_key_names(":narrow"), "enter", "z", "ctrl+g")
         assert listener.pending_substring_listing is None
         assert listener.input_text == ""
         assert listener.history.revision == post_submit_revision
@@ -1471,7 +1471,7 @@ async def test_pilot_submission_preserves_objects_and_fixed_regions(tmp_path):
     app = PbuiApp(listener)
 
     async with app.run_test(size=(60, 9)) as pilot:
-        await pilot.press("l", "s", "enter")
+        await pilot.press("colon", "l", "s", "enter")
         await pilot.pause()
         matches = [
             presentation
@@ -1513,7 +1513,7 @@ async def test_enter_accept_cancel_and_typed_results_synchronize_views(tmp_path)
             listener.cancel()
             listener.set_input_text("")
             command.cursor_position = 0
-            await pilot.press(*_key_names(command_name), "enter")
+            await pilot.press(*_key_names(":" + command_name), "enter")
             assert listener.pending_request is not None
             assert listener.pending_request.command_name == command_name
             assert listener.input_text == command_name
@@ -1527,7 +1527,7 @@ async def test_enter_accept_cancel_and_typed_results_synchronize_views(tmp_path)
             assert listener.chip is None
             assert command.cursor_position == 0
 
-        listener.set_input_text("cd child")
+        listener.set_input_text(": cd child")
         command.cursor_position = len(listener.input_text)
         revision = listener.history.revision
         old_scroll = int(surface.scroll_y)
@@ -1538,7 +1538,7 @@ async def test_enter_accept_cancel_and_typed_results_synchronize_views(tmp_path)
         assert command.prompt == f"pbui:{child}> "
         assert listener.input_text == ""
 
-        listener.set_input_text("unknown")
+        listener.set_input_text(": unknown")
         command.cursor_position = len(listener.input_text)
         await pilot.press("enter")
         assert listener.input_text == ""
@@ -1547,7 +1547,7 @@ async def test_enter_accept_cancel_and_typed_results_synchronize_views(tmp_path)
         assert listener.history.presentations[-1].presentation_type is listener.types.error
 
         listener.set_input_text("rm")
-        listener.submit("rm")
+        listener.submit(": rm")
         listener.state.chip = Chip(
             listener.types.file, FileRef(str(tmp_path / "unused")), "unused"
         )
@@ -1570,7 +1570,7 @@ async def test_ctrl_d_guard_and_ctrl_c_exit_bindings(tmp_path):
         assert listener.input_text == "x"
 
         listener.set_input_text("")
-        listener.submit("rm")
+        listener.submit(": rm")
         await pilot.press("ctrl+d")
         assert app.is_running
         assert listener.pending_request is not None
@@ -1602,7 +1602,7 @@ async def test_coordinates_hover_click_selection_and_literal_misses(tmp_path, mo
     target.write_text("payload")
     (tmp_path / "directory").mkdir()
     listener = make_listener(tmp_path)
-    listener.submit("ls")
+    listener.submit(": ls")
     target_presentation = next(
         presentation
         for presentation in listener.history.presentations
@@ -1672,7 +1672,7 @@ async def test_click_uses_original_objects_for_accept_default_and_refusals(tmp_p
     directory = tmp_path / "directory"
     directory.mkdir()
     listener = make_listener(tmp_path)
-    listener.submit("ls")
+    listener.submit(": ls")
     file_presentation = next(
         item for item in listener.history.presentations if type(item.value) is FileRef
     )
@@ -1700,7 +1700,7 @@ async def test_click_uses_original_objects_for_accept_default_and_refusals(tmp_p
                 )
             )
 
-        listener.submit("rm")
+        listener.submit(": rm")
         app.screen.synchronize()
         revision = listener.history.revision
         click_presentation(directory_presentation)
@@ -1781,8 +1781,8 @@ async def test_action_menu_private_presentations_labels_hits_and_documentation(t
     (tmp_path / "file name").write_text("x")
     (tmp_path / "directory").mkdir()
     listener = make_listener(tmp_path)
-    listener.submit("ls")
-    listener.submit("ps")
+    listener.submit(": ls")
+    listener.submit(": ps")
     app = PbuiApp(listener)
 
     async with app.run_test(size=(100, 9)) as pilot:
@@ -1868,7 +1868,7 @@ async def test_action_menu_private_presentations_labels_hits_and_documentation(t
 async def test_action_menu_gestures_refusals_modal_and_close_boundaries(tmp_path):
     (tmp_path / "file").write_text("x")
     listener = make_listener(tmp_path)
-    listener.submit("ls")
+    listener.submit(": ls")
     listener._append_text("text")
     listener._append_error("error")
     context = DrawingContext()
@@ -1951,7 +1951,7 @@ async def test_action_menu_gestures_refusals_modal_and_close_boundaries(tmp_path
         screen.synchronize()
         assert screen.documentation_line.sentence == "Text has no default click action."
 
-        listener.submit("rm")
+        listener.submit(": rm")
         screen.synchronize()
         pending = listener.pending_request
         documentation = screen.documentation_line.sentence
@@ -1962,7 +1962,7 @@ async def test_action_menu_gestures_refusals_modal_and_close_boundaries(tmp_path
         assert listener.pending_request is pending
         assert screen.documentation_line.sentence == documentation
         listener.cancel()
-        listener.submit("narrow")
+        listener.submit(": narrow")
         screen.synchronize()
         pending_listing = listener.pending_substring_listing
         documentation = screen.documentation_line.sentence
@@ -1980,9 +1980,9 @@ async def test_action_menu_older_listing_view_actions_and_bound_narrow(tmp_path)
     (tmp_path / "small").write_text("x")
     (tmp_path / "directory").mkdir()
     listener = make_listener(tmp_path)
-    listener.submit("ls")
+    listener.submit(": ls")
     directory_listing = listener.history.rows[0].listing_owner
-    listener.submit("ps")
+    listener.submit(": ps")
     process_listing = next(
         row.listing_owner for row in listener.history.rows
         if row.listing_owner is not directory_listing
@@ -2044,9 +2044,9 @@ async def test_action_menu_member_actions_outside_click_and_stale_target(tmp_pat
         records={42: InspectedProcess(42, 1000, "sleeping", "worker")}
     )
     listener = HeadlessListener(str(tmp_path), RootedFilesystem(tmp_path), processes)
-    listener.submit("ls")
+    listener.submit(": ls")
     listing = listener.history.rows[0].listing_owner
-    listener.submit("ps")
+    listener.submit(": ps")
     file_target = next(
         item for item in listener.history.presentations
         if item.presentation_type is listener.types.file
@@ -2141,7 +2141,7 @@ async def test_action_menu_open_close_and_view_keep_wrapped_viewport_anchor(tmp_
     (tmp_path / "long-file-name-for-wrapping").write_text("12345")
     listener = make_listener(tmp_path)
     _append_plain_rows(listener, 15, prefix="before-long-text")
-    listener.submit("ls")
+    listener.submit(": ls")
     listing = next(row.listing_owner for row in listener.history.rows if row.listing_owner)
     member = listing.member_presentations[0]
     member_row = next(row for row in listener.history.rows if member in row.presentations)
@@ -2204,7 +2204,7 @@ async def test_action_menu_open_close_and_view_keep_wrapped_viewport_anchor(tmp_
 async def test_action_menu_hover_repaints_only_item_rows(tmp_path, monkeypatch):
     (tmp_path / "file").write_text("x")
     listener = make_listener(tmp_path)
-    listener.submit("ls")
+    listener.submit(": ls")
     _append_plain_rows(listener, 300)
     header = next(
         item for item in listener.history.presentations

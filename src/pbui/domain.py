@@ -28,7 +28,7 @@ from pbui.text import (
 
 @dataclass(frozen=True, slots=True)
 class DomainTypes:
-    """The seven exact presentation-type entries owned by an application."""
+    """The exact presentation-type entries owned by an application."""
 
     file: PresentationType
     directory: PresentationType
@@ -37,6 +37,7 @@ class DomainTypes:
     error: PresentationType
     directory_listing: PresentationType
     process_listing: PresentationType
+    value: PresentationType
 
 
 def register_domain_types(registry: PresentationTypeRegistry) -> DomainTypes:
@@ -52,6 +53,7 @@ def register_domain_types(registry: PresentationTypeRegistry) -> DomainTypes:
         error=registry.register("Error"),
         directory_listing=registry.register("DirectoryListing"),
         process_listing=registry.register("ProcessListing"),
+        value=registry.register("Value"),
     )
 
 
@@ -759,6 +761,10 @@ def register_domain_drawers(
         _expect_exact(value, ProcessListing, "ProcessListing")
         return ""
 
+    def draw_value(value: Any, _context: DrawingContext) -> str:
+        kind = truncate_display(escape_display(type(value).__name__), 64)
+        return f"{kind} <repr unavailable>"
+
     context.register_drawer(types.file, draw_file)
     context.register_drawer(types.directory, draw_directory)
     context.register_drawer(types.process, draw_process)
@@ -766,6 +772,7 @@ def register_domain_drawers(
     context.register_drawer(types.error, draw_error)
     context.register_drawer(types.directory_listing, draw_directory_listing)
     context.register_drawer(types.process_listing, draw_process_listing)
+    context.register_drawer(types.value, draw_value)
     return context
 
 

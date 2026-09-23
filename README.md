@@ -24,7 +24,7 @@ it, its environment, and its dependencies with uv only.
 |---|---|---|
 | [`listener`](docs/design/implementation/listener/README.md) | First listener: `ls`, `ps`, `show`, `cd`, `rm`, `kill` | Implemented through listener 005 |
 | [`listings`](docs/design/implementation/listings/README.md) | Tables, an action menu, and sort and filter on `ls` and `ps` | Implemented through listings 008 |
-| [`repl`](docs/design/implementation/repl/README.md) | Python evaluation and a generic value presentation | Charter written, waiting for review |
+| [`repl`](docs/design/implementation/repl/README.md) | Python evaluation and a generic value presentation | Spec amended, waiting for acceptance |
 
 A new discussion should read [`AGENTS.md`](AGENTS.md). The listener
 and listings specifications are the law for the program as it stands.

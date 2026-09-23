@@ -7,11 +7,10 @@ listener command. Unprefixed input is Python.
 | Artifact | Path |
 |---|---|
 | Charter | [`charter.md`](charter.md) |
-| Spec | `spec.md` (designer writes this; not started) |
-| Checkpoints | `checkpoints/` (one at a time, after the spec) |
+| Spec | [`spec.md`](spec.md) |
+| Checkpoints | `checkpoints/` (one at a time, after the spec is accepted) |
 
-**Status.** Charter written, waiting for review. No spec, no
-checkpoints.
+**Status.** Spec written and amended after review. No checkpoints yet.
 
 The program lives at the project root
 (`/home/dharmatech/journal/2026-09-21-pbui-python-terminal/`).

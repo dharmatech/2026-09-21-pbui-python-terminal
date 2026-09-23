@@ -155,6 +155,28 @@ class PresentationHistory:
             self._discard_oldest()
         self._revision += 1
 
+    def replace_row(self, old_row: HistoryRow, new_row: HistoryRow) -> None:
+        """Replace one retained drawing while preserving presentation identities."""
+
+        rows = list(self._rows)
+        index = next((i for i, row in enumerate(rows) if row is old_row), None)
+        if index is None:
+            raise KeyError("the row is not retained")
+        if new_row.listing_owner is not old_row.listing_owner:
+            raise ValueError("replacement must keep the listing owner")
+        old_presentations = self._validate_row(old_row)
+        new_presentations = self._validate_row(new_row)
+        if old_presentations.keys() != new_presentations.keys() or any(
+            new_presentations[key] is not old_presentations[key]
+            for key in old_presentations
+        ):
+            raise ValueError("replacement must keep the same presentations")
+        rows[index] = new_row
+        self._rows = deque(rows)
+        for presentation in new_row.presentations:
+            presentation.replace_intervals(())
+        self._revision += 1
+
     def replace_listing_rows(
         self,
         listing_identity: object,

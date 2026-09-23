@@ -63,7 +63,7 @@ def render(row, width=500):
     return layout(history, width)
 
 
-def test_registers_exact_seven_domain_types_in_order_and_by_identity():
+def test_registers_exact_domain_types_in_order_and_by_identity():
     registry = PresentationTypeRegistry()
     types = register_domain_types(registry)
 
@@ -75,8 +75,9 @@ def test_registers_exact_seven_domain_types_in_order_and_by_identity():
         "Error",
         "DirectoryListing",
         "ProcessListing",
+        "Value",
     ]
-    assert len({id(entry) for entry in registry}) == 7
+    assert len({id(entry) for entry in registry}) == 8
     assert types.file is registry.lookup("File")
     assert types.directory is registry.lookup("Directory")
     assert types.process is registry.lookup("Process")
@@ -84,6 +85,7 @@ def test_registers_exact_seven_domain_types_in_order_and_by_identity():
     assert types.error is registry.lookup("Error")
     assert types.directory_listing is registry.lookup("DirectoryListing")
     assert types.process_listing is registry.lookup("ProcessListing")
+    assert types.value is registry.lookup("Value")
     assert types.file is not types.directory
     with pytest.raises(ValueError, match="already registered"):
         register_domain_types(registry)
