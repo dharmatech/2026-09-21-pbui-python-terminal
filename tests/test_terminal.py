@@ -93,6 +93,32 @@ def domain_presentations(listener):
     }
 
 
+def _process_listener(tmp_path, records, *, displayed_user="tester"):
+    return HeadlessListener(
+        str(tmp_path),
+        RootedFilesystem(tmp_path),
+        FixedProcesses(own_pid=-1, records={record.pid: record for record in records}),
+        username_lookup=lambda _uid: displayed_user,
+    )
+
+
+def _offset_for_logical_column(surface, presentation, logical_column):
+    logical_row = surface.current_layout.rows[
+        presentation.intervals[0].physical_row
+    ].logical_row
+    remaining = logical_column
+    for physical_row, rendered_row in enumerate(surface.current_layout.rows):
+        if rendered_row.logical_row != logical_row:
+            continue
+        if remaining < rendered_row.display_width:
+            return (
+                remaining,
+                physical_row - int(surface.scroll_y),
+            )
+        remaining -= rendered_row.display_width
+    raise AssertionError(f"logical column {logical_column} is outside the row")
+
+
 def test_dependency_metadata_and_terminal_import_boundary():
     with (PROJECT_ROOT / "pyproject.toml").open("rb") as project_file:
         metadata = tomllib.load(project_file)
@@ -439,6 +465,121 @@ def test_visual_states_follow_exact_accept_types(tmp_path, command, acceptable):
     assert counterfeit_style.dim and not counterfeit_style.reverse
 
 
+def test_listing_semantic_colors_headers_and_cached_state_precedence(tmp_path):
+    state_colors = {
+        "running": "#00d787",
+        "sleeping": "#5f87d7",
+        "idle": "#5f87d7",
+        "disk-sleep": "#d7af00",
+        "stopped": "#d787ff",
+        "tracing": "#d787ff",
+        "zombie": "#ff5f5f",
+        "dead": "#ff5f5f",
+        "unknown": "#a8a8a8",
+    }
+    records = [
+        InspectedProcess(pid, 1000, state, f"command-{state}")
+        for pid, state in enumerate(state_colors, start=1)
+    ]
+    listener = _process_listener(tmp_path, records)
+    process_service = listener.processes
+    listener.submit("ps")
+    listing = listener.history.rows[0].listing_owner
+    assert listing.header_presentation is not None
+
+    header = presentation_style(
+        listener, listing.header_presentation, listing.header_presentation
+    )
+    assert header.color is not None and header.color.name == "default"
+    assert header.bold and header.reverse and not header.dim
+
+    by_pid = {
+        member.reference.pid: presentation
+        for member, presentation in zip(
+            listing.members, listing.member_presentations, strict=True
+        )
+    }
+    for record in records:
+        presentation = by_pid[record.pid]
+        style = presentation_style(listener, presentation, None)
+        assert style.color is not None
+        assert style.color.triplet.hex == state_colors[record.state]
+        hovered = presentation_style(listener, presentation, presentation)
+        assert hovered.color == style.color and hovered.reverse
+
+    process_service.records[1] = InspectedProcess(1, 1000, "dead", "changed")
+    cached = presentation_style(listener, by_pid[1], None)
+    assert cached.color is not None and cached.color.triplet.hex == "#00d787"
+
+    assert listener.apply_listing_view(listing, "sort", "state")
+    assert presentation_style(listener, by_pid[1], None).color == cached.color
+
+    synthetic = domain_presentations(listener)["Process"]
+    synthetic_style = presentation_style(listener, synthetic, None)
+    assert synthetic_style.color is not None
+    assert synthetic_style.color.name == "default"
+
+    listener.submit("kill")
+    acceptable = presentation_style(listener, by_pid[2], by_pid[2])
+    assert acceptable.color is not None
+    assert acceptable.color.triplet.hex == "#00d787"
+    assert acceptable.bold and acceptable.underline and acceptable.reverse
+    inert_header = presentation_style(
+        listener, listing.header_presentation, listing.header_presentation
+    )
+    assert inert_header.color is not None
+    assert inert_header.color.triplet.hex == "#808080"
+    assert inert_header.dim and not inert_header.bold
+    assert not inert_header.underline and not inert_header.reverse
+
+
+def test_directory_colors_and_whole_process_row_styling(tmp_path):
+    (tmp_path / "file").write_text("payload")
+    (tmp_path / "directory").mkdir()
+    listener = make_listener(tmp_path)
+    listener.submit("ls")
+    directory_listing = listener.history.rows[0].listing_owner
+    by_value_type = {
+        type(presentation.value): presentation
+        for presentation in directory_listing.member_presentations
+    }
+    file_style = presentation_style(listener, by_value_type[FileRef], None)
+    directory_style = presentation_style(
+        listener, by_value_type[DirectoryRef], None
+    )
+    assert file_style.color is not None and file_style.color.name == "default"
+    assert directory_style.color is not None
+    assert directory_style.color.triplet.hex == "#00afff"
+    header_style = presentation_style(
+        listener, directory_listing.header_presentation, None
+    )
+    assert header_style.bold
+
+    process_listener = _process_listener(
+        tmp_path,
+        [InspectedProcess(7, 1000, "sleeping", "x" * 80)],
+        displayed_user="a-user-name-that-truncates",
+    )
+    process_listener.submit("ps")
+    process_listing = process_listener.history.rows[0].listing_owner
+    presentation = process_listing.member_presentations[0]
+    current_layout = layout(process_listener.history, 120)
+    physical_row = presentation.intervals[0].physical_row
+    row = current_layout.rows[physical_row]
+    rich_row = terminal_module.build_history_row_text(
+        process_listener, current_layout, physical_row
+    )
+    console = Console()
+    assert row.text.endswith("…")
+    assert len(row.text) == 90
+    for column in (0, 9, 10, 11, 21, 22, 23, 39, 40, 41, 42, 89):
+        assert current_layout.hit_test(column, physical_row) is presentation
+    for index in range(len(row.text)):
+        style = rich_row.get_style_at_offset(console, index)
+        assert style.color is not None
+        assert style.color.triplet.hex == "#5f87d7"
+
+
 def test_documentation_formatter_covers_normative_table(tmp_path):
     listener = make_listener(tmp_path)
     item = domain_presentations(listener)
@@ -506,6 +647,87 @@ def test_documentation_formatter_covers_normative_table(tmp_path):
     )
 
 
+def test_listing_header_documentation_and_all_accept_refusals(tmp_path):
+    (tmp_path / "file").write_text("payload")
+    listener = make_listener(tmp_path)
+    listener.submit("ls")
+    listener.submit("ps")
+    directory_listing = listener.history.rows[0].listing_owner
+    process_listing = next(
+        row.listing_owner
+        for row in listener.history.rows
+        if row.listing_owner is not directory_listing
+    )
+    headers = (
+        directory_listing.header_presentation,
+        process_listing.header_presentation,
+    )
+    assert format_documentation(listener, headers[0]) == (
+        "Directory listing: Ctrl-O or right-click to open its view menu."
+    )
+    assert format_documentation(listener, headers[1]) == (
+        "Process listing: Ctrl-O or right-click to open its view menu."
+    )
+
+    expected = {
+        "rm": (
+            "Accept File for rm: directory listing is not a File target.",
+            "Accept File for rm: process listing is not a File target.",
+        ),
+        "cd": (
+            "Accept Directory for cd: directory listing is not a Directory target.",
+            "Accept Directory for cd: process listing is not a Directory target.",
+        ),
+        "kill": (
+            "Accept Process for kill: directory listing is not a Process target.",
+            "Accept Process for kill: process listing is not a Process target.",
+        ),
+        "show": (
+            "Accept File, Directory, or Process for show: directory listing is not a File, Directory, or Process target.",
+            "Accept File, Directory, or Process for show: process listing is not a File, Directory, or Process target.",
+        ),
+    }
+    for command, sentences in expected.items():
+        listener.cancel()
+        listener.submit(command)
+        assert tuple(format_documentation(listener, header) for header in headers) == (
+            sentences
+        )
+
+
+def test_truncated_command_documentation_uses_cached_field_and_exact_boundaries(
+    tmp_path,
+):
+    listener = _process_listener(
+        tmp_path,
+        [
+            InspectedProcess(10, 1000, "running", "x" * 48),
+            InspectedProcess(11, 1000, "sleeping", "y" * 49),
+            InspectedProcess(12, 1000, "idle", "short"),
+        ],
+        displayed_user="user-name-that-is-far-too-wide",
+    )
+    listener.submit("ps")
+    listing = listener.history.rows[0].listing_owner
+    by_pid = {
+        presentation.value.pid: presentation
+        for presentation in listing.member_presentations
+    }
+    ordinary_10 = "Click to show process 10."
+    ordinary_11 = "Click to show process 11."
+    ordinary_12 = "Click to show process 12."
+    assert format_documentation(listener, by_pid[10], 42) == ordinary_10
+    assert format_documentation(listener, by_pid[11], 41) == ordinary_11
+    assert format_documentation(listener, by_pid[11], 42) == (
+        "Command is truncated; click to show the full command for process 11."
+    )
+    assert format_documentation(listener, by_pid[11], 89) == (
+        "Command is truncated; click to show the full command for process 11."
+    )
+    assert format_documentation(listener, by_pid[11], 90) == ordinary_11
+    assert format_documentation(listener, by_pid[12], 42) == ordinary_12
+
+
 def test_documentation_truncation_is_one_row_and_display_safe(tmp_path):
     listener = make_listener(tmp_path)
     line = DocumentationLine(listener)
@@ -517,6 +739,92 @@ def test_documentation_truncation_is_one_row_and_display_safe(tmp_path):
     assert not truncate_display("Aé界Z", 4).endswith("e…")
     assert terminal_module.display_width is pure_display_width
     assert terminal_module.truncate_display is pure_truncate_display
+
+
+@pytest.mark.asyncio
+async def test_wrapped_command_field_refreshes_documentation_without_restyling(
+    tmp_path, monkeypatch
+):
+    listener = _process_listener(
+        tmp_path,
+        [
+            InspectedProcess(21, 1000, "running", "long-command-" * 8),
+            InspectedProcess(22, 1000, "sleeping", "short"),
+        ],
+    )
+    listener.submit("ps")
+    listing = listener.history.rows[0].listing_owner
+    long_process, short_process = listing.member_presentations
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(24, 14)) as pilot:
+        await pilot.pause()
+        surface = app.screen.history_surface
+        documentation = app.screen.documentation_line
+        assert len({item.physical_row for item in long_process.intervals}) > 1
+
+        built_rows = []
+        original_builder = terminal_module.build_history_row_text
+
+        def record_row_build(*args, **kwargs):
+            built_rows.append(args[2])
+            return original_builder(*args, **kwargs)
+
+        monkeypatch.setattr(
+            terminal_module, "build_history_row_text", record_row_build
+        )
+
+        x, y = _offset_for_logical_column(surface, long_process, 41)
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
+        assert documentation.sentence == "Click to show process 21."
+        assert surface.pointer_logical_column == 41
+        assert built_rows
+
+        built_rows.clear()
+        x, y = _offset_for_logical_column(surface, long_process, 42)
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
+        assert documentation.sentence == (
+            "Command is truncated; click to show the full command for process 21."
+        )
+        assert surface.pointer_logical_column == 42
+        assert built_rows == []
+
+        x, y = _offset_for_logical_column(surface, long_process, 89)
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
+        assert documentation.sentence == (
+            "Command is truncated; click to show the full command for process 21."
+        )
+        assert surface.pointer_logical_column == 89
+        assert built_rows == []
+
+        x, y = _offset_for_logical_column(surface, long_process, 41)
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
+        assert documentation.sentence == "Click to show process 21."
+        assert built_rows == []
+
+        long_start = long_process.intervals[0].physical_row
+        short_start = short_process.intervals[0].physical_row
+        surface.scroll_to_row(short_start - long_start)
+        assert documentation.sentence != (
+            "Command is truncated; click to show the full command for process 21."
+        )
+
+        await pilot.resize_terminal(28, 14)
+        await pilot.pause()
+        assert documentation.sentence == format_documentation(
+            listener,
+            surface.hovered_presentation,
+            surface.pointer_logical_column,
+        )
+
+        assert listener.apply_listing_view(listing, "narrow", "short")
+        surface.synchronize()
+        assert documentation.sentence == format_documentation(
+            listener,
+            surface.hovered_presentation,
+            surface.pointer_logical_column,
+        )
+        assert "process 21" not in documentation.sentence
 
 
 def test_prompt_cursor_and_atomic_chip_are_passive_listener_drawing(tmp_path):
@@ -654,6 +962,95 @@ async def test_paste_is_one_row_and_tab_remains_focus_navigation(tmp_path):
         command.post_message(events.Key("unknown", "\ud800"))
         await pilot.pause()
         assert listener.input_text == before
+
+
+@pytest.mark.asyncio
+async def test_visible_substring_accept_editor_submission_and_cancellation(tmp_path):
+    target = tmp_path / "target-file"
+    target.write_text("payload")
+    listener = make_listener(tmp_path)
+    listener.submit("ls")
+    listing = listener.history.rows[0].listing_owner
+    member = next(
+        presentation
+        for presentation in listing.member_presentations
+        if type(presentation.value) is FileRef
+    )
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(46, 10)) as pilot:
+        command = app.screen.command_input
+        documentation = app.screen.documentation_line
+        surface = app.screen.history_surface
+        await pilot.press(*_key_names("narrow"), "enter")
+
+        prefix = f"pbui:{tmp_path}> narrow "
+        assert listener.pending_substring_listing is listing
+        assert listener.input_text == ""
+        assert listener.chip is None
+        assert command.display_text == prefix
+        assert command.cursor_position == 0
+        assert command._cursor_index(command.display_text) == len(prefix)
+        assert documentation.sentence == (
+            "Type a substring and press Enter to narrow this listing; "
+            "Ctrl-G or Esc cancels."
+        )
+        rendered_documentation = documentation.render().plain
+        assert "\n" not in rendered_documentation
+        assert rendered_documentation.endswith("…")
+
+        revision = listener.history.revision
+        await pilot.press("left", "backspace", "home", "enter", "ctrl+d")
+        assert app.is_running
+        assert listener.pending_substring_listing is listing
+        assert listener.input_text == ""
+        assert listener.history.revision == revision
+        assert command.display_text == prefix
+
+        interval = member.intervals[0]
+        surface.scroll_to_row(interval.physical_row)
+        y = interval.physical_row - int(surface.scroll_y)
+        surface.on_click(
+            _mouse_event(
+                events.Click,
+                surface,
+                interval.start_column,
+                y,
+                button=1,
+            )
+        )
+        assert listener.pending_substring_listing is listing
+        assert listener.history.revision == revision
+        assert documentation.sentence.startswith("Type a substring")
+
+        await pilot.press("a", "b", "c", "home", "left", "backspace", "delete")
+        assert listener.input_text == "bc"
+        assert command.cursor_position == 0
+        command.post_message(events.Paste("X\nY\t"))
+        await pilot.pause()
+        assert listener.input_text == "XYbc"
+        assert command.cursor_position == 2
+        assert command.display_text == prefix + "XYbc"
+        assert command._cursor_index(command.display_text) == len(prefix) + 2
+
+        await pilot.press("enter")
+        assert listener.pending_substring_listing is None
+        assert listener.input_text == ""
+        assert listener.history.revision == revision + 1
+        assert command.display_text == f"pbui:{tmp_path}> "
+        assert not documentation.sentence.startswith("Type a substring")
+
+        post_submit_revision = listener.history.revision
+        await pilot.press(*_key_names("narrow"), "enter", "q", "escape")
+        assert listener.pending_substring_listing is None
+        assert listener.input_text == ""
+        assert listener.history.revision == post_submit_revision
+        assert command.display_text == f"pbui:{tmp_path}> "
+
+        await pilot.press(*_key_names("narrow"), "enter", "z", "ctrl+g")
+        assert listener.pending_substring_listing is None
+        assert listener.input_text == ""
+        assert listener.history.revision == post_submit_revision
 
 
 @pytest.mark.asyncio

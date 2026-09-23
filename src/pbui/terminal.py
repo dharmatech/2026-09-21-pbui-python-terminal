@@ -21,7 +21,15 @@ from textual.strip import Strip
 from textual.widget import Widget
 
 from pbui.commands import HeadlessListener
-from pbui.domain import DirectoryRef, FileRef, ProcessRef, escape_display
+from pbui.domain import (
+    DirectoryListing,
+    DirectoryRef,
+    FileRef,
+    ProcessListing,
+    ProcessListingMember,
+    ProcessRef,
+    escape_display,
+)
 from pbui.substrate import DisplayInterval, Presentation
 from pbui.text import (
     Layout,
@@ -33,6 +41,23 @@ from pbui.text import (
 
 
 _UNSET = object()
+
+_PROCESS_STATE_COLORS = {
+    "running": "#00d787",
+    "sleeping": "#5f87d7",
+    "idle": "#5f87d7",
+    "disk-sleep": "#d7af00",
+    "stopped": "#d787ff",
+    "tracing": "#d787ff",
+    "zombie": "#ff5f5f",
+    "dead": "#ff5f5f",
+    "unknown": "#a8a8a8",
+}
+
+_SUBSTRING_DOCUMENTATION = (
+    "Type a substring and press Enter to narrow this listing; "
+    "Ctrl-G or Esc cancels."
+)
 
 
 def filter_one_row(text: str) -> str:
@@ -61,6 +86,16 @@ def _domain_kind(
         return "Directory"
     if presentation_type is types.process and type(presentation.value) is ProcessRef:
         return "Process"
+    if (
+        presentation_type is types.directory_listing
+        and type(presentation.value) is DirectoryListing
+    ):
+        return "DirectoryListing"
+    if (
+        presentation_type is types.process_listing
+        and type(presentation.value) is ProcessListing
+    ):
+        return "ProcessListing"
     if presentation_type is types.text:
         return "Text"
     if presentation_type is types.error:
@@ -82,10 +117,34 @@ def _pid(presentation: Presentation) -> str:
     return str(value.pid)
 
 
+def _captured_process_member(
+    listener: HeadlessListener, presentation: Presentation
+) -> ProcessListingMember | None:
+    """Find a process row's immutable captured record by presentation identity."""
+
+    seen_listings: set[int] = set()
+    for row in listener.history.rows:
+        listing = row.listing_owner
+        if type(listing) is not ProcessListing or id(listing) in seen_listings:
+            continue
+        seen_listings.add(id(listing))
+        for member, member_presentation in zip(
+            listing.members, listing.member_presentations, strict=True
+        ):
+            if member_presentation is presentation:
+                return member
+    return None
+
+
 def format_documentation(
-    listener: HeadlessListener, presentation: Presentation | None
+    listener: HeadlessListener,
+    presentation: Presentation | None,
+    logical_column: int | None = None,
 ) -> str:
     """Return the exact documentation sentence for the current pointer state."""
+
+    if listener.pending_substring_listing is not None:
+        return _SUBSTRING_DOCUMENTATION
 
     kind = _domain_kind(listener, presentation)
     request = listener.pending_request
@@ -98,7 +157,22 @@ def format_documentation(
             return f"Click to show directory “{_name(presentation)}”."
         if kind == "Process":
             assert presentation is not None
+            member = _captured_process_member(listener, presentation)
+            if (
+                member is not None
+                and logical_column is not None
+                and 42 <= logical_column < 90
+                and display_width(member.command) > 48
+            ):
+                return (
+                    "Command is truncated; click to show the full command "
+                    f"for process {_pid(presentation)}."
+                )
             return f"Click to show process {_pid(presentation)}."
+        if kind == "DirectoryListing":
+            return "Directory listing: Ctrl-O or right-click to open its view menu."
+        if kind == "ProcessListing":
+            return "Process listing: Ctrl-O or right-click to open its view menu."
         if kind == "Text":
             return "Text has no default click action."
         if kind == "Error":
@@ -106,6 +180,19 @@ def format_documentation(
         return "No presentation under pointer."
 
     command = request.command_name
+    if kind in {"DirectoryListing", "ProcessListing"}:
+        accepted = {
+            "rm": "File",
+            "cd": "Directory",
+            "kill": "Process",
+            "show": "File, Directory, or Process",
+        }[command]
+        subject = (
+            "directory listing" if kind == "DirectoryListing" else "process listing"
+        )
+        return (
+            f"Accept {accepted} for {command}: {subject} is not a {accepted} target."
+        )
     if command == "rm":
         prefix = "Accept File for rm:"
         if kind is None:
@@ -227,14 +314,22 @@ def presentation_style(
             reverse=False,
         )
 
-    color = (
-        "red"
-        if presentation.presentation_type is listener.types.error
-        else "default"
-    )
+    kind = _domain_kind(listener, presentation)
+    color = "default"
+    bold = False
+    if kind == "Error":
+        color = "red"
+    elif kind == "Directory":
+        color = "#00afff"
+    elif kind == "Process":
+        member = _captured_process_member(listener, presentation)
+        if member is not None:
+            color = _PROCESS_STATE_COLORS[member.state]
+    elif kind in {"DirectoryListing", "ProcessListing"}:
+        bold = True
     return Style(
         color=color,
-        bold=False,
+        bold=bold,
         underline=False,
         dim=False,
         reverse=presentation is hovered_presentation,
@@ -387,6 +482,7 @@ class HistorySurface(ScrollView):
         self._history_revision = -1
         self._content_width = 0
         self._pending_request: object = _UNSET
+        self._pending_substring_listing: object = _UNSET
 
     @property
     def history_layout(self) -> Layout:
@@ -506,6 +602,26 @@ class HistorySurface(ScrollView):
 
         return self._pointer_offset
 
+    @property
+    def pointer_logical_column(self) -> int | None:
+        """Logical display column beneath the retained viewport pointer."""
+
+        offset = self._pointer_offset
+        if offset is None or not self._offset_is_in_content(offset):
+            return None
+        physical_row = offset.y + int(self.scroll_y)
+        if physical_row < 0 or physical_row >= len(self.current_layout.rows):
+            return None
+        rendered_row = self.current_layout.rows[physical_row]
+        if offset.x >= rendered_row.display_width:
+            return None
+        logical_row = rendered_row.logical_row
+        return offset.x + sum(
+            row.display_width
+            for row in self.current_layout.rows[:physical_row]
+            if row.logical_row == logical_row
+        )
+
     def _recompute_pointer_hover(self, *, scroll_y: int | None = None) -> None:
         if self._pointer_offset is None:
             return
@@ -529,7 +645,11 @@ class HistorySurface(ScrollView):
         revision = self.listener.history.revision
         width_changed = content_width != self._content_width
         pending_request = self.listener.pending_request
-        state_changed = pending_request is not self._pending_request
+        pending_substring_listing = self.listener.pending_substring_listing
+        state_changed = (
+            pending_request is not self._pending_request
+            or pending_substring_listing is not self._pending_substring_listing
+        )
         if (
             not force
             and revision == self._history_revision
@@ -545,6 +665,7 @@ class HistorySurface(ScrollView):
         self._history_revision = revision
         self._content_width = content_width
         self._pending_request = pending_request
+        self._pending_substring_listing = pending_substring_listing
 
         self.virtual_size = Size(content_width, len(self.current_layout.rows))
 
@@ -585,6 +706,7 @@ class HistorySurface(ScrollView):
         if presentation is not None and presentation not in self.current_layout.presentations:
             presentation = None
         if presentation is self.hovered_presentation:
+            self._refresh_documentation()
             return
         previous = self.hovered_presentation
         self.hovered_presentation = presentation
@@ -611,7 +733,7 @@ class HistorySurface(ScrollView):
     def _refresh_documentation(self) -> None:
         if self.is_mounted and isinstance(self.screen, ListenerScreen):
             self.screen.documentation_line.set_presentation(
-                self.hovered_presentation
+                self.hovered_presentation, self.pointer_logical_column
             )
 
     def on_mount(self) -> None:
@@ -721,13 +843,21 @@ class DocumentationLine(Widget):
         super().__init__(id=id)
         self.listener = listener
         self.presentation: Presentation | None = None
+        self.logical_column: int | None = None
 
     @property
     def sentence(self) -> str:
-        return format_documentation(self.listener, self.presentation)
+        return format_documentation(
+            self.listener, self.presentation, self.logical_column
+        )
 
-    def set_presentation(self, presentation: Presentation | None) -> None:
+    def set_presentation(
+        self,
+        presentation: Presentation | None,
+        logical_column: int | None = None,
+    ) -> None:
         self.presentation = presentation
+        self.logical_column = logical_column
         self.refresh()
 
     def render(self) -> Text:
@@ -854,15 +984,23 @@ class CommandInput(Widget):
         return format_prompt(self.listener)
 
     @property
+    def editor_prefix(self) -> str:
+        return (
+            "narrow "
+            if self.listener.pending_substring_listing is not None
+            else ""
+        )
+
+    @property
     def display_text(self) -> str:
-        text = self.prompt + self.listener.input_text
+        text = self.prompt + self.editor_prefix + self.listener.input_text
         chip = self.listener.chip
-        if chip is not None:
+        if chip is not None and self.listener.pending_substring_listing is None:
             text += f" ⟨{chip.presentation_type.name}: {chip.label}⟩"
         return text
 
     def _cursor_index(self, text: str) -> int:
-        input_start = len(self.prompt)
+        input_start = len(self.prompt) + len(self.editor_prefix)
         position = self.cursor_position
         input_text = self.listener.input_text
         if position < len(input_text):
@@ -953,7 +1091,8 @@ class ListenerScreen(Screen[None]):
         elif self.history_surface.pointer_offset is not None:
             self.history_surface._recompute_pointer_hover()
         self.documentation_line.set_presentation(
-            self.history_surface.hovered_presentation
+            self.history_surface.hovered_presentation,
+            self.history_surface.pointer_logical_column,
         )
         self.command_input.clamp_cursor()
         self.command_input.refresh()
@@ -995,6 +1134,7 @@ class PbuiApp(App[None], inherit_bindings=False):
             self.listener.input_text == ""
             and self.listener.chip is None
             and self.listener.pending_request is None
+            and self.listener.pending_substring_listing is None
         ):
             self.exit()
 
