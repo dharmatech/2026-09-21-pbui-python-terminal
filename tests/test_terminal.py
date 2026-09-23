@@ -119,6 +119,32 @@ def _offset_for_logical_column(surface, presentation, logical_column):
     raise AssertionError(f"logical column {logical_column} is outside the row")
 
 
+def _first_physical_row(surface, logical_row):
+    logical_index = next(
+        index for index, row in enumerate(surface._logical_rows) if row is logical_row
+    )
+    return next(
+        index
+        for index, row in enumerate(surface.current_layout.rows)
+        if row.logical_row == logical_index
+    )
+
+
+def _top_logical_row(surface):
+    return surface._logical_rows[
+        surface.current_layout.rows[int(surface.scroll_y)].logical_row
+    ]
+
+
+def _append_plain_rows(listener, count, *, prefix="after"):
+    for index in range(count):
+        listener.history.append(
+            listener.drawing_contexts.standalone.present_row(
+                f"{prefix}-{index}", listener.types.text
+            )
+        )
+
+
 def test_dependency_metadata_and_terminal_import_boundary():
     with (PROJECT_ROOT / "pyproject.toml").open("rb") as project_file:
         metadata = tomllib.load(project_file)
@@ -919,6 +945,354 @@ async def test_scroll_and_resize_preserve_logical_anchor_and_fixed_regions(tmp_p
         surface.synchronize()
         await pilot.pause()
         assert 0 <= surface.scroll_y <= surface.max_scroll_y
+
+
+@pytest.mark.asyncio
+async def test_listing_replacement_keeps_outside_row_identity_at_viewport_top(tmp_path):
+    for index in range(8):
+        (tmp_path / f"item-{index}").write_text("data")
+    listener = make_listener(tmp_path)
+    listener.submit("ls")
+    listing = listener.history.rows[0].listing_owner
+    _append_plain_rows(listener, 12)
+    outside = tuple(row for row in listener.history.rows if row.listing_owner is None)
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(28, 8)):
+        surface = app.screen.history_surface
+        anchor = outside[2]
+        surface.scroll_to_row(_first_physical_row(surface, anchor))
+        assert _top_logical_row(surface) is anchor
+        revision = listener.history.revision
+
+        assert listener.apply_listing_view(listing, "narrow", "item-0")
+        surface.synchronize()
+        assert listener.history.revision == revision + 1
+        assert len(listener.history.rows) == len(outside) + 2
+        assert _top_logical_row(surface) is anchor
+        assert tuple(row for row in listener.history.rows if row.listing_owner is None) == outside
+
+        assert listener.apply_listing_view(listing, "widen")
+        surface.synchronize()
+        assert len(listener.history.rows) == len(outside) + 9
+        assert _top_logical_row(surface) is anchor
+        assert all(
+            current is original
+            for current, original in zip(
+                (row for row in listener.history.rows if row.listing_owner is None),
+                outside,
+                strict=True,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_listing_header_member_sort_filter_widen_and_missing_member_anchor(
+    tmp_path, monkeypatch
+):
+    records = [
+        InspectedProcess(pid, 1000, "sleeping" if pid == 1 else "running", f"worker-{pid}")
+        for pid in range(1, 10)
+    ]
+    listener = _process_listener(tmp_path, records)
+    listener.submit("ps")
+    monkeypatch.setattr(
+        listener.processes,
+        "list_for_uid",
+        lambda _uid: pytest.fail("redisplay recaptured processes"),
+    )
+    listing = listener.history.rows[0].listing_owner
+    _append_plain_rows(listener, 10)
+    member = listing.member_presentations[0]
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(34, 8)):
+        surface = app.screen.history_surface
+        header = listener.history.rows[0]
+        surface.scroll_to_row(_first_physical_row(surface, header))
+        assert listener.apply_listing_view(listing, "sort", "state")
+        surface.synchronize()
+        assert _top_logical_row(surface).presentations == (listing.header_presentation,)
+
+        old_member_row = next(row for row in listener.history.rows if member in row.presentations)
+        surface.scroll_to_row(_first_physical_row(surface, old_member_row))
+        old_logical_index = next(i for i, row in enumerate(listener.history.rows) if row is old_member_row)
+        assert listener.apply_listing_view(listing, "sort", "pid")
+        surface.synchronize()
+        assert member in _top_logical_row(surface).presentations
+        assert next(i for i, row in enumerate(listener.history.rows) if member in row.presentations) != old_logical_index
+
+        assert listener.apply_listing_view(listing, "narrow", "worker-1")
+        surface.synchronize()
+        assert member in _top_logical_row(surface).presentations
+        assert listener.apply_listing_view(listing, "widen")
+        surface.synchronize()
+        assert member in _top_logical_row(surface).presentations
+
+        assert listener.apply_listing_view(listing, "narrow", "worker-5")
+        surface.synchronize()
+        assert _top_logical_row(surface).presentations == (listing.header_presentation,)
+
+
+@pytest.mark.asyncio
+async def test_listing_anchor_fallbacks_after_header_and_outside_row_eviction(tmp_path):
+    records = [
+        InspectedProcess(pid, 1000, "running", f"worker-{pid}")
+        for pid in range(1, 7)
+    ]
+    listener = HeadlessListener(
+        str(tmp_path),
+        RootedFilesystem(tmp_path),
+        FixedProcesses(own_pid=-1, records={record.pid: record for record in records}),
+        history_max_rows=9,
+    )
+    listener.submit("ps")
+    listing = listener.history.rows[0].listing_owner
+    assert listener.apply_listing_view(listing, "narrow", "worker-1")
+    _append_plain_rows(listener, 7)
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(24, 7)):
+        surface = app.screen.history_surface
+        header = listener.history.rows[0]
+        surface.scroll_to_row(_first_physical_row(surface, header))
+        assert _top_logical_row(surface) is header
+        assert listener.apply_listing_view(listing, "widen")
+        first_retained = listener.history.rows[0]
+        assert first_retained.listing_owner is listing
+        assert listing.header_presentation not in first_retained.presentations
+        surface.synchronize()
+        assert _top_logical_row(surface) is first_retained
+
+    four_records = records[:4]
+    listener = HeadlessListener(
+        str(tmp_path),
+        RootedFilesystem(tmp_path),
+        FixedProcesses(own_pid=-1, records={record.pid: record for record in four_records}),
+        history_max_rows=9,
+    )
+    _append_plain_rows(listener, 4, prefix="before")
+    oldest = listener.history.rows[0]
+    listener.submit("ps")
+    listing = listener.history.rows[4].listing_owner
+    assert listener.apply_listing_view(listing, "narrow", "worker-1")
+    _append_plain_rows(listener, 3)
+    app = PbuiApp(listener)
+    async with app.run_test(size=(24, 7)):
+        surface = app.screen.history_surface
+        surface.scroll_to_row(0)
+        assert _top_logical_row(surface) is oldest
+        assert listener.apply_listing_view(listing, "widen")
+        assert all(row is not oldest for row in listener.history.rows)
+        first_retained = listener.history.rows[0]
+        surface.synchronize()
+        assert _top_logical_row(surface) is first_retained
+
+
+@pytest.mark.asyncio
+async def test_fully_evicted_listing_anchor_uses_first_retained_history_row(tmp_path):
+    listener = HeadlessListener(
+        str(tmp_path),
+        RootedFilesystem(tmp_path),
+        FixedProcesses(
+            own_pid=-1,
+            records={1: InspectedProcess(1, 1000, "running", "worker")},
+        ),
+        history_max_rows=5,
+    )
+    listener.submit("ps")
+    listing = listener.history.rows[0].listing_owner
+    _append_plain_rows(listener, 3)
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(24, 7)):
+        surface = app.screen.history_surface
+        surface.scroll_to_row(0)
+        assert _top_logical_row(surface).listing_owner is listing
+        _append_plain_rows(listener, 2, prefix="new")
+        first_retained = listener.history.rows[0]
+        assert all(row.listing_owner is not listing for row in listener.history.rows)
+        surface.synchronize()
+        assert _top_logical_row(surface) is first_retained
+
+
+@pytest.mark.asyncio
+async def test_wrapped_listing_anchor_survives_replacement_and_resizes(tmp_path):
+    records = [
+        InspectedProcess(pid, 1000, "sleeping", f"long-command-{pid}-" * 5)
+        for pid in range(1, 10)
+    ]
+    listener = _process_listener(tmp_path, records)
+    listener.submit("ps")
+    listing = listener.history.rows[0].listing_owner
+    _append_plain_rows(listener, 10)
+    member = listing.member_presentations[1]
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(24, 8)) as pilot:
+        surface = app.screen.history_surface
+        row = next(row for row in listener.history.rows if member in row.presentations)
+        first = _first_physical_row(surface, row)
+        surface.scroll_to_row(first + 1)
+        assert int(surface.scroll_y) == first + 1
+        assert listener.apply_listing_view(listing, "sort", "state")
+        surface.synchronize()
+        assert member in _top_logical_row(surface).presentations
+        assert int(surface.scroll_y) - _first_physical_row(surface, _top_logical_row(surface)) == 1
+
+        await pilot.resize_terminal(30, 8)
+        assert member in _top_logical_row(surface).presentations
+        assert int(surface.scroll_y) - _first_physical_row(surface, _top_logical_row(surface)) == 1
+        await pilot.resize_terminal(30, 6)
+        assert member in _top_logical_row(surface).presentations
+        assert int(surface.scroll_y) - _first_physical_row(surface, _top_logical_row(surface)) == 1
+        await pilot.resize_terminal(30, 9)
+        assert member in _top_logical_row(surface).presentations
+        assert int(surface.scroll_y) - _first_physical_row(surface, _top_logical_row(surface)) == 1
+        surface.synchronize(force=True)
+        assert member in _top_logical_row(surface).presentations
+        assert int(surface.scroll_y) - _first_physical_row(surface, _top_logical_row(surface)) == 1
+        assert app.screen.documentation_line.region.height == 1
+        assert app.screen.command_input.region.height == 1
+        assert app.screen.history_surface.region.height == 7
+
+
+@pytest.mark.asyncio
+async def test_explanatory_row_anchor_and_wrapped_offset_clamp(tmp_path):
+    listener = _process_listener(
+        tmp_path,
+        [InspectedProcess(1, 1000, "running", "worker")],
+    )
+    listener.submit("ps")
+    listing = listener.history.rows[0].listing_owner
+    _append_plain_rows(listener, 12)
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(24, 7)) as pilot:
+        surface = app.screen.history_surface
+        member = next(row for row in listener.history.rows if row.presentations == listing.member_presentations)
+        first = _first_physical_row(surface, member)
+        surface.scroll_to_row(first + 2)
+        assert _top_logical_row(surface) is member
+        assert listener.apply_listing_view(listing, "narrow", "no-such-command")
+        surface.synchronize()
+        assert _top_logical_row(surface).presentations == (listing.header_presentation,)
+        assert int(surface.scroll_y) - _first_physical_row(surface, _top_logical_row(surface)) == 2
+        await pilot.resize_terminal(120, 7)
+        assert _top_logical_row(surface).presentations == (listing.header_presentation,)
+        assert int(surface.scroll_y) == _first_physical_row(surface, _top_logical_row(surface))
+
+        explanation = next(row for row in listener.history.rows if row.listing_owner is listing and not row.presentations)
+        surface.scroll_to_row(_first_physical_row(surface, explanation))
+        assert _top_logical_row(surface) is explanation
+        assert listener.apply_listing_view(listing, "only", "sleeping")
+        surface.synchronize()
+        assert _top_logical_row(surface).listing_owner is listing
+        assert not _top_logical_row(surface).presentations
+        await pilot.resize_terminal(30, 7)
+        assert _top_logical_row(surface).listing_owner is listing
+        assert not _top_logical_row(surface).presentations
+        assert listener.apply_listing_view(listing, "widen")
+        surface.synchronize()
+        assert _top_logical_row(surface).presentations == (listing.header_presentation,)
+
+
+@pytest.mark.asyncio
+async def test_typed_view_and_modal_narrow_keep_anchor_but_appends_reveal_newest(tmp_path):
+    records = [
+        InspectedProcess(pid, 1000, "sleeping" if pid == 1 else "running", f"worker-{pid}")
+        for pid in range(1, 9)
+    ]
+    listener = _process_listener(tmp_path, records)
+    listener.submit("ps")
+    listing = listener.history.rows[0].listing_owner
+    _append_plain_rows(listener, 12)
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(30, 7)) as pilot:
+        surface = app.screen.history_surface
+        member = listing.member_presentations[0]
+        row = next(row for row in listener.history.rows if member in row.presentations)
+        surface.scroll_to_row(_first_physical_row(surface, row))
+        assert member in _top_logical_row(surface).presentations
+
+        for command_text in ("sort state", "only sleeping", "widen"):
+            revision = listener.history.revision
+            listener.set_input_text(command_text)
+            app.screen.command_input.cursor_position = len(command_text)
+            await pilot.press("enter")
+            assert listener.history.revision == revision + 1
+            assert member in _top_logical_row(surface).presentations
+
+        revision = listener.history.revision
+        await pilot.press(*_key_names("narrow"), "enter")
+        assert listener.pending_substring_listing is listing
+        assert listener.history.revision == revision
+        assert member in _top_logical_row(surface).presentations
+        await pilot.press(*_key_names("worker-1"), "enter")
+        assert listener.pending_substring_listing is None
+        assert listener.history.revision == revision + 1
+        assert member in _top_logical_row(surface).presentations
+
+        listener.set_input_text("unknown")
+        app.screen.command_input.cursor_position = len(listener.input_text)
+        await pilot.press("enter")
+        assert int(surface.scroll_y) == int(surface.max_scroll_y)
+        surface.scroll_to_row(_first_physical_row(surface, _top_logical_row(surface)))
+        listener.set_input_text("ps")
+        app.screen.command_input.cursor_position = 2
+        await pilot.press("enter")
+        assert int(surface.scroll_y) == int(surface.max_scroll_y)
+        assert listener.history.rows[-1].listing_owner is not listing
+
+
+@pytest.mark.asyncio
+async def test_hover_and_documentation_rehit_after_view_resize_and_pointer_exit(tmp_path):
+    records = [
+        InspectedProcess(1, 1000, "sleeping", "worker-1"),
+        InspectedProcess(2, 1000, "running", "worker-2"),
+    ]
+    listener = _process_listener(tmp_path, records)
+    listener.submit("ps")
+    listing = listener.history.rows[0].listing_owner
+    _append_plain_rows(listener, 14)
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(34, 12)) as pilot:
+        surface = app.screen.history_surface
+        documentation = app.screen.documentation_line
+        header = listener.history.rows[0]
+        surface.scroll_to_row(_first_physical_row(surface, header))
+        first_member = next(row for row in listener.history.rows if row.presentations == (listing.member_presentations[0],))
+        y = _first_physical_row(surface, first_member) - int(surface.scroll_y)
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, y))
+        assert documentation.sentence == "Click to show process 1."
+
+        revision = listener.history.revision
+        assert listener.apply_listing_view(listing, "sort", "state")
+        surface.synchronize()
+        assert listener.history.revision == revision + 1
+        assert surface.hovered_presentation is listing.member_presentations[1]
+        assert documentation.sentence == "Click to show process 2."
+
+        assert listener.apply_listing_view(listing, "narrow", "worker-1")
+        surface.synchronize()
+        assert surface.hovered_presentation is listing.member_presentations[0]
+        assert documentation.sentence == "Click to show process 1."
+
+        await pilot.resize_terminal(26, 12)
+        assert surface.hovered_presentation is surface.presentation_at_content_offset(0, y)
+        assert documentation.sentence == format_documentation(
+            listener, surface.hovered_presentation, surface.pointer_logical_column
+        )
+
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, 8))
+        assert surface.pointer_offset == Offset(0, 8)
+        await pilot.resize_terminal(26, 6)
+        assert surface.pointer_offset is None
+        assert surface.hovered_presentation is None
+        assert documentation.sentence == "No presentation under pointer."
+        assert listener.history.revision == revision + 2
 
 
 @pytest.mark.asyncio

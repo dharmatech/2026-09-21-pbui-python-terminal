@@ -8,6 +8,7 @@ testing into widgets.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
 from rich.style import Style
 from rich.text import Text
@@ -32,6 +33,7 @@ from pbui.domain import (
 )
 from pbui.substrate import DisplayInterval, Presentation
 from pbui.text import (
+    HistoryRow,
     Layout,
     _character_width,
     display_width,
@@ -58,6 +60,28 @@ _SUBSTRING_DOCUMENTATION = (
     "Type a substring and press Enter to narrow this listing; "
     "Ctrl-G or Esc cancels."
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _ViewportAnchor:
+    row: HistoryRow
+    owner: DirectoryListing | ProcessListing | None
+    row_key: Presentation | None
+    wrapped_offset: int
+
+
+def _history_appended(
+    before: tuple[HistoryRow, ...], after: tuple[HistoryRow, ...]
+) -> bool:
+    """Recognize newly appended output without interpreting command text."""
+
+    old_rows = {id(row) for row in before}
+    old_owners = {id(row.listing_owner) for row in before if row.listing_owner is not None}
+    return any(
+        id(row) not in old_rows
+        and (row.listing_owner is None or id(row.listing_owner) not in old_owners)
+        for row in after
+    )
 
 
 def filter_one_row(text: str) -> str:
@@ -481,6 +505,7 @@ class HistorySurface(ScrollView):
         self._logical_rows = listener.history.rows
         self._history_revision = -1
         self._content_width = 0
+        self._viewport_height = 0
         self._pending_request: object = _UNSET
         self._pending_substring_listing: object = _UNSET
 
@@ -526,7 +551,7 @@ class HistorySurface(ScrollView):
         if regions:
             self.refresh(*regions)
 
-    def _oldest_visible_logical_row(self) -> object | None:
+    def _viewport_anchor(self) -> _ViewportAnchor | None:
         if not self.current_layout.rows or not self._logical_rows:
             return None
         physical_row = min(
@@ -535,27 +560,61 @@ class HistorySurface(ScrollView):
         logical_index = self.current_layout.rows[physical_row].logical_row
         if logical_index >= len(self._logical_rows):
             return None
-        return self._logical_rows[logical_index]
+        first = physical_row
+        while first > 0 and self.current_layout.rows[first - 1].logical_row == logical_index:
+            first -= 1
+        row = self._logical_rows[logical_index]
+        owner = row.listing_owner
+        listing = owner if type(owner) in {DirectoryListing, ProcessListing} else None
+        return _ViewportAnchor(
+            row,
+            listing,
+            row.presentations[0] if listing is not None and row.presentations else None,
+            physical_row - first,
+        )
 
-    def _anchored_scroll_y(self, anchor: object, fallback: int) -> int:
-        logical_index = next(
-            (
-                index
-                for index, row in enumerate(self.listener.history.rows)
-                if row is anchor
-            ),
-            None,
-        )
+    def _anchored_scroll_y(self, anchor: _ViewportAnchor | None) -> int:
+        rows = self._logical_rows
+        if not rows or not self.current_layout.rows:
+            return 0
+        if anchor is None:
+            return 0
+
+        logical_index = next((i for i, row in enumerate(rows) if row is anchor.row), None)
+        if logical_index is None and anchor.owner is not None:
+            owned = [i for i, row in enumerate(rows) if row.listing_owner is anchor.owner]
+            if owned:
+                for i in owned:
+                    presentations = rows[i].presentations
+                    if (
+                        (anchor.row_key is None and not presentations)
+                        or any(item is anchor.row_key for item in presentations)
+                    ):
+                        logical_index = i
+                        break
+                if logical_index is None:
+                    header = anchor.owner.header_presentation
+                    logical_index = next(
+                        (
+                            i for i in owned
+                            if any(item is header for item in rows[i].presentations)
+                        ),
+                        owned[0],
+                    )
         if logical_index is None:
-            return fallback
-        return next(
-            (
-                index
-                for index, row in enumerate(self.current_layout.rows)
-                if row.logical_row == logical_index
-            ),
-            fallback,
+            logical_index = 0
+
+        first = next(
+            i for i, row in enumerate(self.current_layout.rows)
+            if row.logical_row == logical_index
         )
+        stop = first + 1
+        while (
+            stop < len(self.current_layout.rows)
+            and self.current_layout.rows[stop].logical_row == logical_index
+        ):
+            stop += 1
+        return first + min(anchor.wrapped_offset, stop - first - 1)
 
     def _clamp_scroll_row(self, row: int) -> int:
         viewport_height = (
@@ -642,8 +701,12 @@ class HistorySurface(ScrollView):
         """Relayout changed history/width and refresh all derived drawing state."""
 
         content_width = self.content_width
+        viewport_height = (
+            self.scrollable_content_region.height if self.is_mounted else 0
+        )
         revision = self.listener.history.revision
         width_changed = content_width != self._content_width
+        height_changed = viewport_height != self._viewport_height
         pending_request = self.listener.pending_request
         pending_substring_listing = self.listener.pending_substring_listing
         state_changed = (
@@ -654,25 +717,23 @@ class HistorySurface(ScrollView):
             not force
             and revision == self._history_revision
             and not width_changed
+            and not height_changed
             and not state_changed
         ):
             return False
 
-        fallback_scroll = int(self.scroll_y)
-        anchor = self._oldest_visible_logical_row() if width_changed else None
+        anchor = self._viewport_anchor()
         self.current_layout = layout(self.listener.history, content_width)
         self._logical_rows = self.listener.history.rows
         self._history_revision = revision
         self._content_width = content_width
+        self._viewport_height = viewport_height
         self._pending_request = pending_request
         self._pending_substring_listing = pending_substring_listing
 
         self.virtual_size = Size(content_width, len(self.current_layout.rows))
 
-        target_scroll = fallback_scroll
-        if anchor is not None:
-            target_scroll = self._anchored_scroll_y(anchor, fallback_scroll)
-        target_scroll = self._clamp_scroll_row(target_scroll)
+        target_scroll = self._clamp_scroll_row(self._anchored_scroll_y(anchor))
         self.scroll_to(y=target_scroll, animate=False, force=True, immediate=True)
 
         retained = set(self.current_layout.presentations)
@@ -965,11 +1026,15 @@ class CommandInput(Widget):
             else:
                 self._synchronize()
         elif key == "enter":
+            before_rows = self.listener.history.rows
             revision = self.listener.history.revision
             self.listener.submit(self.listener.input_text)
             self.cursor_position = len(self.listener.input_text)
             self._synchronize(
-                reveal_newest=self.listener.history.revision != revision
+                reveal_newest=(
+                    self.listener.history.revision != revision
+                    and _history_appended(before_rows, self.listener.history.rows)
+                )
             )
         else:
             inserted = filter_one_row(event.character or "")
