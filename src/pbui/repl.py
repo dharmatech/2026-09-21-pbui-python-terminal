@@ -106,11 +106,11 @@ class _ValueRepr(reprlib.Repr):
         return repr(value)
 
 
-def _bounded_repr(value: Any) -> str:
+def _bounded_repr(value: Any, *, depth: int = 4, items: int = 16) -> str:
     printer = _ValueRepr()
-    printer.maxlevel = 4
-    printer.maxdict = printer.maxlist = printer.maxtuple = 16
-    printer.maxset = printer.maxfrozenset = printer.maxdeque = 16
+    printer.maxlevel = depth
+    printer.maxdict = printer.maxlist = printer.maxtuple = items
+    printer.maxset = printer.maxfrozenset = printer.maxdeque = items
     printer.maxstring = printer.maxother = 512
     return printer.repr(value)
 
@@ -248,3 +248,23 @@ class PythonEvaluator:
             self._append_error(_execution_error(error, "", self._command_names))
             return None
         return self.display_value(result, include_none=True)
+
+    def show_detail(self, presentation: Presentation) -> bool:
+        """Append detail for the exact retained Value, leaving its identity intact."""
+
+        if (
+            presentation.presentation_type is not self._value_type
+            or self._history.get_presentation(presentation.id) is not presentation
+        ):
+            return False
+        value = presentation.value
+        try:
+            kind = truncate_display(escape_display(type(value).__name__), 64)
+            representation = truncate_display(
+                escape_display(_bounded_repr(value, depth=6, items=64)), 4096
+            )
+        except BaseException as error:
+            self._append_error(_execution_error(error, "", self._command_names))
+        else:
+            self._append_text(f"{kind}: {representation}")
+        return True

@@ -238,3 +238,40 @@ def test_registered_printer_failure_keeps_one_value_and_translator_result_uses_l
     assert converted.value == 12
     assert drawings(listener)[-1] == "int 12"
     assert listener.python_namespace["_"] == 12
+
+
+def test_value_detail_is_bounded_retains_identity_and_does_not_extend_show(tmp_path):
+    listener = listener_at(tmp_path)
+    original = list(range(100))
+    listener.python_namespace["original"] = original
+    listener.submit("original")
+    target = values(listener)[0]
+    assert target.value is original
+    assert "..." in drawings(listener)[0]
+    assert listener.select(target)
+    detail = drawings(listener)[-1]
+    assert detail.startswith("list: [0, 1, 2,")
+    assert "63" in detail and "64" not in detail
+    assert listener.python_namespace["_"] is original
+    listener.submit(":show")
+    assert listener.pending_request is not None
+    assert not listener.select(target)
+    assert listener.chip is None
+    assert listener.pending_request is not None
+    listener.cancel()
+
+    class Broken:
+        def __repr__(self):
+            raise RuntimeError("detail failed")
+
+    broken = Broken()
+    listener.register_python_class(Broken, lambda value: "safe printer")
+    listener.python_namespace["broken"] = broken
+    listener.submit("broken")
+    target = values(listener)[-1]
+    assert listener.python_namespace["_"] is broken
+    assert listener.select(target)
+    assert listener.history.presentations[-1].type is listener.types.error
+    assert "RuntimeError: detail failed" in drawings(listener)[-1]
+    assert listener.python_namespace["_"] is broken
+    assert target.value is broken

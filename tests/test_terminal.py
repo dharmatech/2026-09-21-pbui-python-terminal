@@ -18,6 +18,7 @@ from textual.widgets import Button, Label, Static
 from pbui import terminal as terminal_module
 from pbui.commands import HeadlessListener, InspectedProcess, RootedFilesystem
 from pbui.domain import DirectoryRef, FileRef, ProcessRef
+from pbui.repl import ValueTranslator
 from pbui.substrate import Chip, Presentation, PresentationType
 from pbui.terminal import (
     ActionMenu,
@@ -2272,3 +2273,258 @@ def test_main_composes_runs_and_catches_only_keyboard_interrupt(tmp_path, monkey
     FakeApp.run = lambda self: defect()
     with pytest.raises(RuntimeError, match="defect"):
         main()
+
+
+@pytest.mark.asyncio
+async def test_repl_continuation_prompt_documentation_and_modal_keys(tmp_path):
+    listener = make_listener(tmp_path)
+    listener.submit("1 + 1")
+    target = next(p for p in listener.history.presentations if p.type is listener.types.value)
+    app = PbuiApp(listener)
+    async with app.run_test(size=(78, 10)) as pilot:
+        screen = app.screen
+        editor = screen.command_input
+        assert editor.prompt == f"pbui:{tmp_path}> "
+        for cancel_key in ("ctrl+g", "escape", "ctrl+d"):
+            listener.set_input_text("if True:")
+            editor.cursor_position = len(listener.input_text)
+            await pilot.press("enter")
+            assert listener.pending_python_source == "if True:"
+            assert listener.input_text == ""
+            assert editor.prompt == "...> "
+            assert screen.documentation_line.sentence == (
+                "Python continuation: enter another line; Ctrl-G or Esc discards it."
+            )
+            before = listener.history.rows
+            await pilot.press("ctrl+o")
+            assert not screen.action_menu.is_open
+            interval = target.intervals[0]
+            screen.history_surface.on_click(_mouse_event(
+                events.Click, screen.history_surface, interval.start_column,
+                interval.physical_row - int(screen.history_surface.scroll_y), button=3
+            ))
+            assert not screen.action_menu.is_open
+            assert screen.documentation_line.sentence.startswith("Python continuation:")
+            await pilot.press(cancel_key)
+            assert app.is_running
+            assert listener.pending_python_source == ""
+            assert listener.input_text == ""
+            assert listener.history.rows == before
+            assert editor.prompt == f"pbui:{tmp_path}> "
+        listener.set_input_text("if True:")
+        editor.cursor_position = len(listener.input_text)
+        await pilot.press("enter")
+        await pilot.press("enter")
+        assert listener.pending_python_source == "if True:\n"
+        listener.set_input_text(":ls")
+        editor.cursor_position = len(listener.input_text)
+        await pilot.press("enter")
+        assert listener.pending_python_source == ""
+        assert listener.history.presentations[-1].type is listener.types.error
+        assert not any(row.listing_owner is not None for row in listener.history.rows)
+        listener.set_input_text("if True:")
+        editor.cursor_position = len(listener.input_text)
+        await pilot.press("enter")
+        listener.set_input_text("    2 + 3")
+        editor.cursor_position = len(listener.input_text)
+        await pilot.press("enter")
+        assert listener.pending_python_source
+        await pilot.press("enter")
+        assert listener.pending_python_source == ""
+        assert editor.prompt == f"pbui:{tmp_path}> "
+        assert listener.history.presentations[-1].type is listener.types.value
+        listener.set_input_text("if True:")
+        editor.cursor_position = len(listener.input_text)
+        await pilot.press("enter")
+        await pilot.press("ctrl+c")
+        assert not app.is_running
+
+
+@pytest.mark.asyncio
+async def test_repl_value_wrapped_hit_click_hover_accept_and_history_order(tmp_path):
+    listener = make_listener(tmp_path)
+    listener.submit("list(range(100))")
+    value = next(p for p in listener.history.presentations if p.type is listener.types.value)
+    listener.submit('print("a"); 1')
+    listener.submit('raise ValueError("bad")')
+    assert [p.type for p in listener.history.presentations] == [
+        listener.types.value, listener.types.text, listener.types.value,
+        listener.types.error,
+    ]
+    app = PbuiApp(listener)
+    async with app.run_test(size=(24, 8)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        assert len(value.intervals) > 1
+        surface.scroll_to_row(value.intervals[1].physical_row)
+        interval = value.intervals[1]
+        y = interval.physical_row - int(surface.scroll_y)
+        assert surface.presentation_at_content_offset(0, y) is value
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, y))
+        assert screen.documentation_line.sentence == (
+            "Click to show this Python value; it has no action menu."
+        )
+        screen.open_menu(value)
+        assert not screen.action_menu.is_open
+        assert screen.documentation_line.sentence == "This presentation has no action menu."
+        screen.synchronize()
+        listener.set_input_text("keep input")
+        screen.synchronize()
+        surface.on_click(_mouse_event(events.Click, surface, 0, y, button=1))
+        assert listener.input_text == "keep input"
+        assert listener.history.presentations[-1].type is listener.types.text
+        assert listener.history.presentations[-1].value.startswith("list: [")
+        listener.cancel()
+        listener.submit(":rm")
+        screen.synchronize()
+        surface.scroll_to_row(value.intervals[1].physical_row)
+        y = value.intervals[1].physical_row - int(surface.scroll_y)
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, y))
+        assert screen.documentation_line.sentence == (
+            "Accept File for rm: Value is not a File target."
+        )
+        assert presentation_style(listener, value, value).dim
+        before = listener.history.rows
+        surface.on_click(_mouse_event(events.Click, surface, 0, y, button=1))
+        assert listener.history.rows == before
+        assert listener.chip is None and listener.pending_request is not None
+        await pilot.press("escape")
+        await pilot.resize_terminal(16, 8)
+        await pilot.pause()
+        surface.scroll_to_row(value.intervals[-1].physical_row)
+        interval = value.intervals[-1]
+        y = interval.physical_row - int(surface.scroll_y)
+        assert surface.presentation_at_content_offset(0, y) is value
+        assert screen.documentation_line.region.height == 1
+        assert display_width(screen.documentation_line.render().plain) <= screen.documentation_line.content_size.width
+
+
+@pytest.mark.asyncio
+async def test_repl_registered_value_menu_keeps_translator_indices(tmp_path):
+    class Dummy:
+        def __repr__(self):
+            return "dummy"
+
+    listener = make_listener(tmp_path)
+    original = Dummy()
+    calls = []
+    listener.register_python_class(Dummy, lambda value: "dummy row", (
+        ValueTranslator("show", lambda value: calls.append((0, value)) or 7),
+        ValueTranslator("show", lambda value: calls.append((1, value)) or None),
+        ValueTranslator("fail", lambda value: 1 / 0),
+    ))
+    listener.python_namespace["item"] = original
+    listener.submit("item")
+    target = next(p for p in listener.history.presentations if p.type is listener.types.value)
+    app = PbuiApp(listener)
+    async with app.run_test(size=(95, 12)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        menu = screen.action_menu
+        interval = target.intervals[0]
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface,
+            interval.start_column, interval.physical_row - int(surface.scroll_y)))
+        assert screen.documentation_line.sentence == (
+            "Click to show this Python value; Ctrl-O or right-click to open its action menu."
+        )
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        assert menu.target is target
+        assert menu.labels == ("show", "show", "fail")
+        assert [p.value.translator_index for p in menu.item_presentations] == [0, 1, 2]
+        menu.on_mouse_move(_mouse_event(events.MouseMove, menu, 0, 1))
+        assert screen.documentation_line.sentence == (
+            "Click to apply “show” to this Python value."
+        )
+        menu.on_click(_mouse_event(events.Click, menu, 0, 1, button=1))
+        assert calls == [(1, original)]
+        assert listener.python_namespace["_"] is None
+        assert listener.history.presentations[-1].value is None
+        await pilot.pause()
+        screen.open_menu(target)
+        await pilot.pause()
+        assert menu.is_open
+        menu.on_click(_mouse_event(events.Click, menu, 0, 0, button=1))
+        assert calls[-1] == (0, original)
+        assert listener.python_namespace["_"] == 7
+        screen.open_menu(target)
+        await pilot.pause()
+        assert menu.is_open
+        before = len(listener.history.presentations)
+        menu.on_click(_mouse_event(events.Click, menu, 0, 2, button=1))
+        assert len(listener.history.presentations) == before + 1
+        assert listener.history.presentations[-1].type is listener.types.error
+        assert listener.python_namespace["_"] == 7
+        assert target.value is original
+        surface.scroll_to_row(target.intervals[0].physical_row)
+        interval = target.intervals[0]
+        surface.on_click(_mouse_event(events.Click, surface,
+            interval.start_column, interval.physical_row - int(surface.scroll_y), button=3))
+        assert menu.target is target
+        screen.close_menu()
+        surface.on_click(_mouse_event(events.Click, surface,
+            interval.start_column, interval.physical_row - int(surface.scroll_y), button=1))
+        assert listener.history.presentations[-1].type is listener.types.text
+        assert listener.history.presentations[-1].value == "Dummy: dummy"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_d_blocks_substring_and_menu_then_exits(tmp_path):
+    (tmp_path / "file").write_text("x")
+    listener = make_listener(tmp_path)
+    listener.submit(":ls")
+    header = next(p for p in listener.history.presentations
+                  if p.type is listener.types.directory_listing)
+    app = PbuiApp(listener)
+    async with app.run_test(size=(50, 10)) as pilot:
+        screen = app.screen
+        listener.submit(":narrow")
+        screen.synchronize()
+        await pilot.press("ctrl+d")
+        assert app.is_running and listener.pending_substring_listing is not None
+        await pilot.press("escape")
+        screen.open_menu(header)
+        await pilot.press("ctrl+d")
+        assert app.is_running and screen.action_menu.is_open
+        await pilot.press("escape")
+        await pilot.press("ctrl+d")
+        assert not app.is_running
+
+
+@pytest.mark.asyncio
+async def test_repl_value_hover_restyles_only_affected_wrapped_rows(tmp_path, monkeypatch):
+    listener = make_listener(tmp_path)
+    _append_plain_rows(listener, 200, prefix="before")
+    listener.submit("list(range(100))")
+    value = next(p for p in listener.history.presentations if p.type is listener.types.value)
+    listener.submit("42")
+    other = [p for p in listener.history.presentations if p.type is listener.types.value][-1]
+    _append_plain_rows(listener, 200)
+    app = PbuiApp(listener)
+    async with app.run_test(size=(20, 8)) as pilot:
+        surface = app.screen.history_surface
+        assert len(value.intervals) > 1
+        surface.scroll_to_row(value.intervals[0].physical_row)
+        built = []
+        refreshed = []
+        original_build = surface._build_row
+        original_refresh = surface._refresh_physical_rows
+
+        def record_build(row):
+            built.append(row)
+            return original_build(row)
+
+        def record_refresh(rows):
+            refreshed.append(set(rows))
+            return original_refresh(rows)
+
+        monkeypatch.setattr(surface, "_build_row", record_build)
+        monkeypatch.setattr(surface, "_refresh_physical_rows", record_refresh)
+        monkeypatch.setattr(surface, "_build_all_rows", lambda: pytest.fail("hover rebuilt all rows"))
+        surface.set_hovered_presentation(value)
+        surface.set_hovered_presentation(other)
+        expected = {interval.physical_row for interval in value.intervals + other.intervals}
+        assert set(built) == expected
+        assert refreshed[0] == {interval.physical_row for interval in value.intervals}
+        assert refreshed[1] == expected
+        assert len(built) < len(surface.current_layout.rows)

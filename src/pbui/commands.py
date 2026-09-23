@@ -683,12 +683,14 @@ class HeadlessListener:
         return self._state.backspace()
 
     def select(self, presentation: Presentation | None, label: str = "") -> bool:
-        if self._pending_substring_listing is not None:
+        if self._pending_substring_listing is not None or self._repl.pending_source:
             return False
         if presentation is None:
             return False
         if self._state.pending_request is not None:
             return self._state.select_presentation(presentation, label)
+        if presentation.presentation_type is self._types.value:
+            return self._repl.show_detail(presentation)
         translator = self._translators.lookup(presentation.presentation_type)
         if translator is None:
             return False

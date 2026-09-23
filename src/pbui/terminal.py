@@ -66,6 +66,9 @@ _SUBSTRING_DOCUMENTATION = (
 )
 
 _MENU_DOCUMENTATION = "Point at an action and click; Ctrl-G or Esc closes the menu."
+_CONTINUATION_DOCUMENTATION = (
+    "Python continuation: enter another line; Ctrl-G or Esc discards it."
+)
 _DIRECTORY_ACTIONS = (
     "sort name", "sort size", "sort mtime", "only files", "only directories",
     "narrow", "widen",
@@ -84,6 +87,17 @@ class MenuAction:
     operation: str
     argument: str | None
     target: Presentation
+    translator_index: int | None = None
+
+
+def _menu_action(
+    label: str, target: Presentation, index: int,
+    translator_indices: tuple[int, ...] | None,
+) -> MenuAction:
+    if translator_indices is not None:
+        return MenuAction(label, "python-translator", None, target, translator_indices[index])
+    operation, separator, argument = label.partition(" ")
+    return MenuAction(label, operation, argument if separator else None, target)
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +158,8 @@ def _domain_kind(
         and type(presentation.value) is ProcessListing
     ):
         return "ProcessListing"
+    if presentation_type is types.value:
+        return "Value"
     if presentation_type is types.text:
         return "Text"
     if presentation_type is types.error:
@@ -199,6 +215,8 @@ def _menu_item_documentation(action: MenuAction, listener: HeadlessListener) -> 
         return f"Click to apply “{label}” to this directory listing."
     if kind == "ProcessListing":
         return f"Click to apply “{label}” to this process listing."
+    if kind == "Value":
+        return f"Click to apply “{label}” to this Python value."
     raise AssertionError("menu action requires an actionable target")
 
 
@@ -228,6 +246,8 @@ def format_documentation(
 ) -> str:
     """Return the exact documentation sentence for the current pointer state."""
 
+    if listener.pending_python_source:
+        return _CONTINUATION_DOCUMENTATION
     if listener.pending_substring_listing is not None:
         return _SUBSTRING_DOCUMENTATION
 
@@ -258,6 +278,14 @@ def format_documentation(
             return "Directory listing: Ctrl-O or right-click to open its view menu."
         if kind == "ProcessListing":
             return "Process listing: Ctrl-O or right-click to open its view menu."
+        if kind == "Value":
+            assert presentation is not None
+            if listener.python_translators_for(presentation):
+                return (
+                    "Click to show this Python value; Ctrl-O or right-click "
+                    "to open its action menu."
+                )
+            return "Click to show this Python value; it has no action menu."
         if kind == "Text":
             return "Text has no default click action."
         if kind == "Error":
@@ -370,6 +398,8 @@ def format_documentation(
 def format_prompt(listener: HeadlessListener) -> str:
     """Return the literal prompt derived from the listener's own cwd."""
 
+    if listener.pending_python_source:
+        return "...> "
     return f"pbui:{escape_display(listener.cwd)}> "
 
 
@@ -896,7 +926,8 @@ class HistorySurface(ScrollView):
         if (
             event.button == 3
             and (
-                self.listener.pending_request is not None
+                self.listener.pending_python_source
+                or self.listener.pending_request is not None
                 or self.listener.pending_substring_listing is not None
             )
         ):
@@ -1017,7 +1048,10 @@ class ActionMenu(ScrollView):
     def labels(self) -> tuple[str, ...]:
         return tuple(item.value.label for item in self.item_presentations)
 
-    def open_for(self, target: Presentation, labels: tuple[str, ...]) -> None:
+    def open_for(
+        self, target: Presentation, labels: tuple[str, ...],
+        *, translator_indices: tuple[int, ...] | None = None,
+    ) -> None:
         self.target = target
         self.entered = False
         self.hovered_presentation = None
@@ -1026,12 +1060,7 @@ class ActionMenu(ScrollView):
             Presentation(
                 -(index + 1),
                 self.menu_type,
-                MenuAction(
-                    label,
-                    label.split(" ", 1)[0],
-                    label.split(" ", 1)[1] if " " in label else None,
-                    target,
-                ),
+                _menu_action(label, target, index, translator_indices),
             )
             for index, label in enumerate(labels)
         )
@@ -1440,6 +1469,7 @@ class ListenerScreen(Screen[None]):
             self.listener.history.revision,
             self.listener.pending_request,
             self.listener.pending_substring_listing,
+            self.listener.pending_python_source,
             self.listener.input_text,
             self.listener.chip,
         )
@@ -1501,18 +1531,26 @@ class ListenerScreen(Screen[None]):
         if (
             self.listener.pending_request is not None
             or self.listener.pending_substring_listing is not None
+            or self.listener.pending_python_source
         ):
             self.documentation_line.set_override(None)
             self.synchronize()
             return
         kind = _domain_kind(self.listener, target)
         labels = _menu_labels(kind)
+        translator_indices = None
+        if kind == "Value" and target is not None:
+            translators = self.listener.python_translators_for(target)
+            labels = tuple(item.label for item in translators)
+            translator_indices = tuple(range(len(translators)))
         if target is None or target not in self.listener.history.presentations:
             labels = ()
         if not labels:
             self.documentation_line.set_override(_menu_refusal(target, kind))
             return
-        self.action_menu.open_for(target, labels)
+        self.action_menu.open_for(
+            target, labels, translator_indices=translator_indices
+        )
         self.refresh_menu_documentation()
         self.refresh(layout=True)
         self.call_after_refresh(self.synchronize)
@@ -1536,7 +1574,9 @@ class ListenerScreen(Screen[None]):
             return
         before_rows = self.listener.history.rows
         before_revision = self.listener.history.revision
-        if action.operation in {"show", "cd", "rm", "kill", "ls"}:
+        if action.translator_index is not None:
+            self.listener.invoke_python_translator(target, action.translator_index)
+        elif action.operation in {"show", "cd", "rm", "kill", "ls"}:
             self.listener.execute_stored_member(target, action.operation)
         elif action.operation == "narrow":
             self.listener.begin_listing_narrow(target.value)
@@ -1612,6 +1652,12 @@ class PbuiApp(App[None], inherit_bindings=False):
 
     def action_cancel_listener(self) -> None:
         screen = self.screen
+        if self.listener.pending_python_source:
+            self.listener.cancel_python_continuation()
+            if isinstance(screen, ListenerScreen):
+                screen.command_input.cursor_position = 0
+                screen.synchronize()
+            return
         if isinstance(screen, ListenerScreen) and screen.action_menu.is_open:
             screen.close_menu()
             return
@@ -1622,7 +1668,11 @@ class PbuiApp(App[None], inherit_bindings=False):
 
     def action_open_action_menu(self) -> None:
         screen = self.screen
-        if not isinstance(screen, ListenerScreen) or screen.action_menu.is_open:
+        if (
+            not isinstance(screen, ListenerScreen)
+            or screen.action_menu.is_open
+            or self.listener.pending_python_source
+        ):
             return
         surface = screen.history_surface
         surface.synchronize()
@@ -1635,11 +1685,18 @@ class PbuiApp(App[None], inherit_bindings=False):
         screen.open_menu(target)
 
     def action_exit_if_empty(self) -> None:
+        if self.listener.pending_python_source:
+            self.action_cancel_listener()
+            return
         if (
             self.listener.input_text == ""
             and self.listener.chip is None
             and self.listener.pending_request is None
             and self.listener.pending_substring_listing is None
+            and not (
+                isinstance(self.screen, ListenerScreen)
+                and self.screen.action_menu.is_open
+            )
         ):
             self.exit()
 
