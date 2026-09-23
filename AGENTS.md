@@ -61,12 +61,11 @@ program with a Lisp machine or a CLIM port.
 
 For implementation of the program as it stands, the accepted
 specifications are `docs/design/implementation/listener/spec.md`,
-`docs/design/implementation/listings/spec.md`, and
-`docs/design/implementation/repl/spec.md`. Their charters are the
-original assignments, not the current law. The next exploration is
-`docs/design/implementation/chips/charter.md`: a click inserts a
-history object into the Python expression being typed. SymPy and
-pandas come after that. Until the chips specification is accepted,
-that work is discussion, not implementation. Implementers follow one
-approved checkpoint. The checkpoint repeats the `uv` commands for
-the slice it covers.
+`docs/design/implementation/listings/spec.md`,
+`docs/design/implementation/repl/spec.md`,
+`docs/design/implementation/chips/spec.md`, and
+`docs/design/implementation/sympy/spec.md`. Their charters are the
+original assignments, not the current law. SymPy is implemented through
+`docs/design/implementation/sympy/checkpoints/000-expressions.md`.
+Pandas comes after that. Implementers follow one approved checkpoint. The
+checkpoint repeats the `uv` commands for the slice it covers.

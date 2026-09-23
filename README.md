@@ -25,8 +25,10 @@ it, its environment, and its dependencies with uv only.
 | [`listener`](docs/design/implementation/listener/README.md) | First listener: `ls`, `ps`, `show`, `cd`, `rm`, `kill` | Implemented through listener 005 |
 | [`listings`](docs/design/implementation/listings/README.md) | Tables, an action menu, and sort and filter on `ls` and `ps` | Implemented through listings 008 |
 | [`repl`](docs/design/implementation/repl/README.md) | Python evaluation and a generic value presentation | Implemented through repl 001 |
-| [`chips`](docs/design/implementation/chips/README.md) | Click a history value into the Python expression being typed | Charter written, waiting for review |
+| [`chips`](docs/design/implementation/chips/README.md) | Click a history value into the Python expression being typed | Implemented through chips 001 |
+| [`sympy`](docs/design/implementation/sympy/README.md) | Pretty SymPy expressions and simplify, expand, factor | Implemented through sympy 000 |
 
 A new discussion should read [`AGENTS.md`](AGENTS.md). The listener,
-listings, and REPL specifications are the law for the program as it
-stands. The chips charter is the assignment for the next exploration.
+listings, REPL, and chips specifications are the law for the program
+as it stands, along with the SymPy specification. The
+[`SymPy demo`](docs/design/implementation/sympy/demo.md) offers examples to try.

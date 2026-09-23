@@ -7,6 +7,7 @@ typed, a click inserts the history object into that expression.
 |---|---|
 | Charter | [`charter.md`](charter.md) |
 | Spec | [`spec.md`](spec.md) |
+| Demo | [`demo.md`](demo.md) |
 | Checkpoints | [`chips 000`](checkpoints/000-headless-pieces-and-splicing.md), [`chips 001`](checkpoints/001-screen-and-hand-check.md) |
 
 **Status.** Implemented through chips 001. The chips exploration is complete.

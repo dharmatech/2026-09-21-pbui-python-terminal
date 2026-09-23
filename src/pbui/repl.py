@@ -10,6 +10,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
+import sympy
+
 from pbui.chips import Piece, splice
 from pbui.domain import escape_display
 from pbui.substrate import Presentation, PresentationHistory, PresentationType
@@ -116,6 +118,11 @@ def _bounded_repr(value: Any, *, depth: int = 4, items: int = 16) -> str:
     return printer.repr(value)
 
 
+def _sympy_row(value: sympy.Expr) -> str:
+    pretty = sympy.pretty(value, use_unicode=True, wrap_line=False)
+    return pretty if "\n" not in pretty else sympy.sstr(value)
+
+
 def _compile_error(error: SyntaxError | OverflowError | ValueError) -> str:
     kind = "SyntaxError" if isinstance(error, SyntaxError) else type(error).__name__
     message = f"{kind}: {error.msg if isinstance(error, SyntaxError) else error}"
@@ -163,6 +170,15 @@ class PythonEvaluator:
         self.namespace: dict[str, Any] = {"__name__": "__pbui__"}
         self.pending_lines: tuple[tuple[Piece, ...], ...] = ()
         self.classes = ValueClasses()
+        self.classes.register(
+            sympy.Expr,
+            _sympy_row,
+            (
+                ValueTranslator("simplify", sympy.simplify),
+                ValueTranslator("expand", sympy.expand),
+                ValueTranslator("factor", sympy.factor),
+            ),
+        )
         self._history = history
         self._context = context
         self._value_type = value_type
@@ -275,12 +291,25 @@ class PythonEvaluator:
             return False
         value = presentation.value
         try:
-            kind = truncate_display(escape_display(type(value).__name__), 64)
-            representation = truncate_display(
-                escape_display(_bounded_repr(value, depth=6, items=64)), 4096
-            )
+            if isinstance(value, sympy.Expr):
+                pretty_lines = sympy.pretty(
+                    value, use_unicode=True, wrap_line=False
+                ).split("\n")
+                detail_rows = [
+                    truncate_display(escape_display(line), 120)
+                    for line in pretty_lines[:24]
+                ]
+                if len(pretty_lines) > 24:
+                    detail_rows.append(f"… ({len(pretty_lines) - 24} more lines)")
+            else:
+                kind = truncate_display(escape_display(type(value).__name__), 64)
+                representation = truncate_display(
+                    escape_display(_bounded_repr(value, depth=6, items=64)), 4096
+                )
+                detail_rows = [f"{kind}: {representation}"]
         except BaseException as error:
             self._append_error(_execution_error(error, "", self._command_names))
         else:
-            self._append_text(f"{kind}: {representation}")
+            for row in detail_rows:
+                self._append_text(row)
         return True

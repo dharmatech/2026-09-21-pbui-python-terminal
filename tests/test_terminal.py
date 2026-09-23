@@ -155,6 +155,7 @@ def test_dependency_metadata_and_terminal_import_boundary():
     development = metadata["dependency-groups"]["dev"]
     assert dependencies == [
         "rich>=15.0.0",
+        "sympy>=1.14.0",
         "textual>=8.2.8",
         "wcwidth>=0.8.4",
     ]
