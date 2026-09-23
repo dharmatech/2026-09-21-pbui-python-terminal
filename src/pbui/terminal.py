@@ -31,7 +31,11 @@ from pbui.domain import (
     ProcessRef,
     escape_display,
 )
-from pbui.substrate import DisplayInterval, Presentation
+from pbui.substrate import (
+    DisplayInterval,
+    Presentation,
+    PresentationTypeRegistry,
+)
 from pbui.text import (
     HistoryRow,
     Layout,
@@ -60,6 +64,26 @@ _SUBSTRING_DOCUMENTATION = (
     "Type a substring and press Enter to narrow this listing; "
     "Ctrl-G or Esc cancels."
 )
+
+_MENU_DOCUMENTATION = "Point at an action and click; Ctrl-G or Esc closes the menu."
+_DIRECTORY_ACTIONS = (
+    "sort name", "sort size", "sort mtime", "only files", "only directories",
+    "narrow", "widen",
+)
+_PROCESS_ACTIONS = (
+    "sort pid", "sort state", "sort command", "only running",
+    "only sleeping", "only disk-sleep", "only stopped", "only tracing",
+    "only zombie", "only dead", "only idle", "only unknown",
+    "narrow", "widen",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class MenuAction:
+    label: str
+    operation: str
+    argument: str | None
+    target: Presentation
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +163,43 @@ def _pid(presentation: Presentation) -> str:
     if type(value) is not ProcessRef:
         raise TypeError("process documentation requires a process presentation")
     return str(value.pid)
+
+
+def _menu_labels(kind: str | None) -> tuple[str, ...]:
+    return {
+        "File": ("show", "rm"),
+        "Directory": ("show", "cd", "ls"),
+        "Process": ("show", "kill"),
+        "DirectoryListing": _DIRECTORY_ACTIONS,
+        "ProcessListing": _PROCESS_ACTIONS,
+    }.get(kind, ())
+
+
+def _menu_refusal(target: Presentation | None, kind: str | None) -> str:
+    if target is None:
+        return "Point at a presentation before opening an action menu."
+    if kind == "Text":
+        return "Text has no action menu."
+    if kind == "Error":
+        return "Error has no action menu."
+    return "This presentation has no action menu."
+
+
+def _menu_item_documentation(action: MenuAction, listener: HeadlessListener) -> str:
+    target = action.target
+    kind = _domain_kind(listener, target)
+    label = action.label
+    if kind == "File":
+        return f"Click to run “{label}” for file “{_name(target)}”."
+    if kind == "Directory":
+        return f"Click to run “{label}” for directory “{_name(target)}”."
+    if kind == "Process":
+        return f"Click to run “{label}” for process {_pid(target)}."
+    if kind == "DirectoryListing":
+        return f"Click to apply “{label}” to this directory listing."
+    if kind == "ProcessListing":
+        return f"Click to apply “{label}” to this process listing."
+    raise AssertionError("menu action requires an actionable target")
 
 
 def _captured_process_member(
@@ -736,6 +797,7 @@ class HistorySurface(ScrollView):
         target_scroll = self._clamp_scroll_row(self._anchored_scroll_y(anchor))
         self.scroll_to(y=target_scroll, animate=False, force=True, immediate=True)
 
+        previous_hover = self.hovered_presentation
         retained = set(self.current_layout.presentations)
         if self._pointer_offset is not None:
             if self._offset_is_in_content(self._pointer_offset):
@@ -747,6 +809,12 @@ class HistorySurface(ScrollView):
                 self.hovered_presentation = None
         elif self.hovered_presentation not in retained:
             self.hovered_presentation = None
+        if (
+            self.hovered_presentation is not previous_hover
+            and self.is_mounted
+            and isinstance(self.screen, ListenerScreen)
+        ):
+            self.screen.history_hover_changed()
         self._styled_intervals = _styled_intervals_by_row(self.current_layout)
         self._line_texts = self._build_all_rows()
         self.history_text = _compose_history_text(self._line_texts)
@@ -771,6 +839,8 @@ class HistorySurface(ScrollView):
             return
         previous = self.hovered_presentation
         self.hovered_presentation = presentation
+        if self.is_mounted and isinstance(self.screen, ListenerScreen):
+            self.screen.history_hover_changed()
         physical_rows = {
             interval.physical_row
             for item in (previous, presentation)
@@ -804,6 +874,8 @@ class HistorySurface(ScrollView):
         self.synchronize()
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
+        if isinstance(self.screen, ListenerScreen):
+            self.screen.remember_pointer(event)
         self.synchronize()
         self._pointer_offset = self.content_offset_from_event(event)
         self.set_hovered_presentation(
@@ -819,9 +891,19 @@ class HistorySurface(ScrollView):
 
     def on_click(self, event: events.Click) -> None:
         event.prevent_default().stop()
-        if event.button != 1 or event.chain != 1:
+        if event.chain != 1:
+            return
+        if (
+            event.button == 3
+            and (
+                self.listener.pending_request is not None
+                or self.listener.pending_substring_listing is not None
+            )
+        ):
             return
 
+        if isinstance(self.screen, ListenerScreen):
+            self.screen.remember_pointer(event)
         self.synchronize()
         self._pointer_offset = self.content_offset_from_event(event)
         presentation = (
@@ -830,6 +912,15 @@ class HistorySurface(ScrollView):
             else self._hit_at_offset(self._pointer_offset)
         )
         self.set_hovered_presentation(presentation)
+        if isinstance(self.screen, ListenerScreen):
+            if self.screen.action_menu.is_open:
+                self.screen.close_menu()
+                return
+            if event.button == 3:
+                self.screen.open_menu(presentation)
+                return
+        if event.button != 1:
+            return
         label = ""
         kind = _domain_kind(self.listener, presentation)
         if presentation is not None and kind in {"File", "Directory"}:
@@ -848,6 +939,8 @@ class HistorySurface(ScrollView):
 
     def _scroll_wheel(self, event: events.MouseEvent, delta: int) -> None:
         event.prevent_default().stop()
+        if isinstance(self.screen, ListenerScreen):
+            self.screen.remember_pointer(event)
         self.synchronize()
         self._pointer_offset = self.content_offset_from_event(event)
         self.scroll_to_row(int(self.scroll_y) + delta)
@@ -889,6 +982,203 @@ class HistorySurface(ScrollView):
         )
 
 
+class ActionMenu(ScrollView):
+    """One transient, scrollable panel of private action presentations."""
+
+    can_focus = False
+
+    DEFAULT_CSS = """
+    ActionMenu {
+        display: none;
+        width: 100%;
+        height: 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+        scrollbar-gutter: stable;
+    }
+    """
+
+    def __init__(self, listener: HeadlessListener, *, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self.listener = listener
+        self._registry = PresentationTypeRegistry()
+        self.menu_type = self._registry.register("MenuAction")
+        self.item_presentations: tuple[Presentation, ...] = ()
+        self.hovered_presentation: Presentation | None = None
+        self.target: Presentation | None = None
+        self.entered = False
+        self._pointer_offset: Offset | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self.target is not None
+
+    @property
+    def labels(self) -> tuple[str, ...]:
+        return tuple(item.value.label for item in self.item_presentations)
+
+    def open_for(self, target: Presentation, labels: tuple[str, ...]) -> None:
+        self.target = target
+        self.entered = False
+        self.hovered_presentation = None
+        self._pointer_offset = None
+        self.item_presentations = tuple(
+            Presentation(
+                -(index + 1),
+                self.menu_type,
+                MenuAction(
+                    label,
+                    label.split(" ", 1)[0],
+                    label.split(" ", 1)[1] if " " in label else None,
+                    target,
+                ),
+            )
+            for index, label in enumerate(labels)
+        )
+        self.styles.display = "block"
+        self.styles.height = min(len(labels), max(1, self.screen.size.height - 3))
+        self.virtual_size = Size(max(1, self.size.width), len(labels))
+        self._update_intervals()
+        self.scroll_to(y=0, animate=False, force=True, immediate=True)
+        self.refresh(layout=True)
+
+    def close(self) -> None:
+        self.target = None
+        self.entered = False
+        self.hovered_presentation = None
+        self._pointer_offset = None
+        for item in self.item_presentations:
+            item.replace_intervals(())
+        self.item_presentations = ()
+        self.virtual_size = Size(0, 0)
+        self.styles.display = "none"
+        self.styles.height = 0
+        self.refresh(layout=True)
+
+    def _update_intervals(self) -> None:
+        width = max(1, self.scrollable_content_region.width)
+        self.virtual_size = Size(width, len(self.item_presentations))
+        for index, item in enumerate(self.item_presentations):
+            item.replace_intervals((DisplayInterval(index, 0, width),))
+
+    def on_resize(self, _event: events.Resize) -> None:
+        if self.is_open:
+            self._update_intervals()
+            self.refresh()
+
+    def presentation_at_content_offset(self, x: int, y: int) -> Presentation | None:
+        if not self.is_open:
+            return None
+        region = self.scrollable_content_region
+        if not (0 <= x < region.width and 0 <= y < region.height):
+            return None
+        index = y + int(self.scroll_y)
+        if 0 <= index < len(self.item_presentations):
+            item = self.item_presentations[index]
+            if item.intervals[0].contains(x, index):
+                return item
+        return None
+
+    def _hit_event(self, event: events.MouseEvent) -> Presentation | None:
+        offset = event.get_content_offset(self)
+        return (
+            None if offset is None
+            else self.presentation_at_content_offset(offset.x, offset.y)
+        )
+
+    def set_hovered_presentation(self, presentation: Presentation | None) -> None:
+        if presentation is self.hovered_presentation:
+            return
+        previous = self.hovered_presentation
+        self.hovered_presentation = presentation
+        for item in (previous, presentation):
+            if item is None:
+                continue
+            y = item.intervals[0].physical_row - int(self.scroll_y)
+            if 0 <= y < self.scrollable_content_region.height:
+                self.refresh(Region(0, y, self.scrollable_content_region.width, 1))
+        if isinstance(self.screen, ListenerScreen):
+            self.screen.refresh_menu_documentation()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        self.entered = True
+        if isinstance(self.screen, ListenerScreen):
+            self.screen.remember_pointer(event)
+        self._pointer_offset = event.get_content_offset(self)
+        self.set_hovered_presentation(self._hit_event(event))
+        event.stop()
+
+    def _scroll_wheel(self, event: events.MouseEvent, delta: int) -> None:
+        event.prevent_default().stop()
+        if isinstance(self.screen, ListenerScreen):
+            self.screen.remember_pointer(event)
+        self._pointer_offset = event.get_content_offset(self)
+        self.scroll_to(
+            y=int(self.scroll_y) + delta,
+            animate=False, force=True, immediate=True,
+        )
+        offset = self._pointer_offset
+        self.set_hovered_presentation(
+            None if offset is None
+            else self.presentation_at_content_offset(offset.x, offset.y)
+        )
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self._scroll_wheel(event, -3)
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self._scroll_wheel(event, 3)
+
+    def on_enter(self, _event: events.Enter) -> None:
+        self.entered = True
+
+    def on_leave(self, event: events.Leave) -> None:
+        self._pointer_offset = None
+        if (
+            event.node is self
+            and self.entered
+            and isinstance(self.screen, ListenerScreen)
+        ):
+            self.screen.close_menu()
+
+    def on_click(self, event: events.Click) -> None:
+        event.prevent_default().stop()
+        if not self.is_open or event.chain != 1:
+            return
+        if isinstance(self.screen, ListenerScreen):
+            self.screen.remember_pointer(event)
+        item = self._hit_event(event) if event.button == 1 else None
+        if isinstance(self.screen, ListenerScreen):
+            if item is None:
+                self.screen.close_menu()
+            else:
+                self.screen.execute_menu_item(item)
+
+    def render_line(self, y: int) -> Strip:
+        width = max(0, self.scrollable_content_region.width)
+        index = y + int(self.scroll_y)
+        if width == 0 or not (0 <= index < len(self.item_presentations)):
+            return Strip.blank(width, self.visual_style.rich_style)
+        item = self.item_presentations[index]
+        label = truncate_display(item.value.label, width)
+        line = Text(
+            label + " " * max(0, width - display_width(label)),
+            style=Style(reverse=item is self.hovered_presentation),
+            no_wrap=True,
+            overflow="crop",
+        )
+        options = self.app.console.options.update(
+            width=width, height=1, no_wrap=True, overflow="crop"
+        )
+        rendered = self.app.console.render_lines(
+            line, options, style=self.visual_style.rich_style,
+            pad=False, new_lines=False,
+        )
+        return Strip(rendered[0] if rendered else []).adjust_cell_length(
+            width, self.visual_style.rich_style
+        )
+
+
 class DocumentationLine(Widget):
     """Always-mounted, literal, one-row interaction documentation."""
 
@@ -905,9 +1195,12 @@ class DocumentationLine(Widget):
         self.listener = listener
         self.presentation: Presentation | None = None
         self.logical_column: int | None = None
+        self.override_sentence: str | None = None
 
     @property
     def sentence(self) -> str:
+        if self.override_sentence is not None:
+            return self.override_sentence
         return format_documentation(
             self.listener, self.presentation, self.logical_column
         )
@@ -919,6 +1212,10 @@ class DocumentationLine(Widget):
     ) -> None:
         self.presentation = presentation
         self.logical_column = logical_column
+        self.refresh()
+
+    def set_override(self, sentence: str | None) -> None:
+        self.override_sentence = sentence
         self.refresh()
 
     def render(self) -> Text:
@@ -1120,7 +1417,7 @@ class CommandInput(Widget):
 
 
 class ListenerScreen(Screen[None]):
-    """The sole screen containing the three fixed product regions."""
+    """The sole screen containing history, a transient menu, and fixed rows."""
 
     DEFAULT_CSS = """
     ListenerScreen {
@@ -1132,28 +1429,153 @@ class ListenerScreen(Screen[None]):
         super().__init__()
         self.listener = listener
         self.history_surface = HistorySurface(listener, id="history")
+        self.action_menu = ActionMenu(listener, id="action-menu")
         self.documentation_line = DocumentationLine(listener, id="documentation")
         self.command_input = CommandInput(listener, id="command-input")
+        self._documentation_state = self._listener_state()
+        self._pointer_screen: Offset | None = None
+
+    def _listener_state(self) -> tuple[object, ...]:
+        return (
+            self.listener.history.revision,
+            self.listener.pending_request,
+            self.listener.pending_substring_listing,
+            self.listener.input_text,
+            self.listener.chip,
+        )
 
     def compose(self) -> ComposeResult:
         yield self.history_surface
+        yield self.action_menu
         yield self.documentation_line
         yield self.command_input
 
     def on_mount(self) -> None:
         self.command_input.focus()
 
+    def on_resize(self, _event: events.Resize) -> None:
+        if self.action_menu.is_open:
+            self.action_menu.styles.height = min(
+                len(self.action_menu.item_presentations),
+                max(1, self.size.height - 3),
+            )
+            self.call_after_refresh(self.synchronize)
+
+    def history_hover_changed(self) -> None:
+        if not self.action_menu.is_open:
+            self.documentation_line.set_override(None)
+
+    def remember_pointer(self, event: events.MouseEvent) -> None:
+        self._pointer_screen = event.screen_offset
+
+    def _rehit_history_pointer(self) -> None:
+        pointer = self._pointer_screen
+        if pointer is None:
+            return
+        surface = self.history_surface
+        region = surface.scrollable_content_region
+        if pointer in region:
+            offset = Offset(pointer.x - region.x, pointer.y - region.y)
+            surface._pointer_offset = offset
+            surface.set_hovered_presentation(surface._hit_at_offset(offset))
+        else:
+            surface.clear_pointer()
+
+    def on_leave(self, event: events.Leave) -> None:
+        if event.node is self:
+            self._pointer_screen = None
+            self.history_surface.clear_pointer()
+
+    def refresh_menu_documentation(self) -> None:
+        item = self.action_menu.hovered_presentation
+        sentence = (
+            _MENU_DOCUMENTATION
+            if item is None
+            else _menu_item_documentation(item.value, self.listener)
+        )
+        self.documentation_line.set_override(sentence)
+
+    def open_menu(self, target: Presentation | None) -> None:
+        if self.action_menu.is_open:
+            return
+        if (
+            self.listener.pending_request is not None
+            or self.listener.pending_substring_listing is not None
+        ):
+            self.documentation_line.set_override(None)
+            self.synchronize()
+            return
+        kind = _domain_kind(self.listener, target)
+        labels = _menu_labels(kind)
+        if target is None or target not in self.listener.history.presentations:
+            labels = ()
+        if not labels:
+            self.documentation_line.set_override(_menu_refusal(target, kind))
+            return
+        self.action_menu.open_for(target, labels)
+        self.refresh_menu_documentation()
+        self.refresh(layout=True)
+        self.call_after_refresh(self.synchronize)
+
+    def close_menu(self) -> None:
+        if not self.action_menu.is_open:
+            return
+        self.action_menu.close()
+        self.documentation_line.set_override(None)
+        self.refresh(layout=True)
+        self.call_after_refresh(self.synchronize)
+        self.synchronize()
+
+    def execute_menu_item(self, item: Presentation) -> None:
+        if item not in self.action_menu.item_presentations:
+            return
+        action = item.value
+        self.close_menu()
+        target = action.target
+        if target not in self.listener.history.presentations:
+            return
+        before_rows = self.listener.history.rows
+        before_revision = self.listener.history.revision
+        if action.operation in {"show", "cd", "rm", "kill", "ls"}:
+            self.listener.execute_stored_member(target, action.operation)
+        elif action.operation == "narrow":
+            self.listener.begin_listing_narrow(target.value)
+        else:
+            self.listener.apply_listing_view(
+                target.value, action.operation, action.argument
+            )
+        self.command_input.cursor_position = len(self.listener.input_text)
+        self.synchronize(
+            reveal_newest=(
+                self.listener.history.revision != before_revision
+                and _history_appended(before_rows, self.listener.history.rows)
+            )
+        )
+
+    def on_click(self, event: events.Click) -> None:
+        if self.action_menu.is_open and event.chain == 1:
+            event.prevent_default().stop()
+            self.remember_pointer(event)
+            self.close_menu()
+
     def synchronize(
         self, *, reveal_newest: bool = False, clear_hover: bool = False
     ) -> None:
+        state = self._listener_state()
+        if state != self._documentation_state:
+            self._documentation_state = state
+            if not self.action_menu.is_open:
+                self.documentation_line.set_override(None)
         if clear_hover:
+            self._pointer_screen = None
             self.history_surface.clear_pointer()
         self.history_surface.synchronize()
         if reveal_newest:
             self.history_surface.scroll_to_row(
                 len(self.history_surface.current_layout.rows)
             )
-        elif self.history_surface.pointer_offset is not None:
+        self._rehit_history_pointer()
+        if self._pointer_screen is None and self.history_surface.pointer_offset is not None:
             self.history_surface._recompute_pointer_hover()
         self.documentation_line.set_presentation(
             self.history_surface.hovered_presentation,
@@ -1176,6 +1598,7 @@ class PbuiApp(App[None], inherit_bindings=False):
         ),
         Binding("ctrl+d", "exit_if_empty", show=False, priority=True),
         Binding("ctrl+c", "exit_any_state", show=False, priority=True),
+        Binding("ctrl+o", "open_action_menu", show=False, priority=True),
     ]
 
     def __init__(self, listener: HeadlessListener) -> None:
@@ -1188,11 +1611,28 @@ class PbuiApp(App[None], inherit_bindings=False):
         return ListenerScreen(self.listener)
 
     def action_cancel_listener(self) -> None:
-        self.listener.cancel()
         screen = self.screen
+        if isinstance(screen, ListenerScreen) and screen.action_menu.is_open:
+            screen.close_menu()
+            return
+        self.listener.cancel()
         if isinstance(screen, ListenerScreen):
             screen.command_input.cursor_position = 0
             screen.synchronize(clear_hover=True)
+
+    def action_open_action_menu(self) -> None:
+        screen = self.screen
+        if not isinstance(screen, ListenerScreen) or screen.action_menu.is_open:
+            return
+        surface = screen.history_surface
+        surface.synchronize()
+        offset = surface.pointer_offset
+        target = (
+            surface._hit_at_offset(offset)
+            if offset is not None
+            else surface.hovered_presentation
+        )
+        screen.open_menu(target)
 
     def action_exit_if_empty(self) -> None:
         if (

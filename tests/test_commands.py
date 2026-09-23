@@ -1662,3 +1662,60 @@ def test_view_operations_do_not_refresh_directory_or_process_capture(tmp_path):
         tuple(processes.list_uids),
         tuple(lookups),
     ) == calls
+
+
+def test_stored_member_seam_uses_retained_reference_and_existing_checks(tmp_path):
+    file_path = tmp_path / "remove-me"
+    file_path.write_text("payload")
+    directory = tmp_path / "child"
+    directory.mkdir()
+    processes = FixedProcesses(records={42: InspectedProcess(42, 1000, "sleeping", "worker")})
+    listener = make_listener(tmp_path, processes)
+    listener.submit("ls")
+    listing = listing_owners(listener)[0]
+    file_presentation = one_presentation(listener, listener.types.file, FileRef(str(file_path)))
+    directory_presentation = one_presentation(
+        listener, listener.types.directory, DirectoryRef(str(directory))
+    )
+
+    assert not listener.execute_stored_member(file_presentation, "kill")
+    assert listener.execute_stored_member(file_presentation, "show")
+    assert history_text(listener)[-1].startswith(f"path: {file_path} | type: file")
+    assert listener.execute_stored_member(directory_presentation, "cd")
+    assert listener.cwd == str(directory)
+    assert listener.execute_stored_member(directory_presentation, "ls")
+    assert listing_owners(listener)[-1] is not listing
+    assert listing_owners(listener)[-1].directory is directory_presentation.value
+    assert listener.execute_stored_member(file_presentation, "rm")
+    assert not file_path.exists()
+
+    listener.submit("ps")
+    process_presentation = one_presentation(listener, listener.types.process, ProcessRef(42))
+    assert listener.execute_stored_member(process_presentation, "show")
+    assert listener.execute_stored_member(process_presentation, "kill")
+    assert processes.sent == [(42, signal.SIGTERM)]
+    processes.records.pop(42)
+    assert listener.execute_stored_member(process_presentation, "kill")
+    assert processes.sent == [(42, signal.SIGTERM)]
+    assert history_text(listener)[-1].startswith("Error:")
+
+
+def test_stored_member_and_exact_narrow_reject_stale_or_modal_targets(tmp_path):
+    (tmp_path / "file").write_text("x")
+    listener = make_listener(tmp_path, history_max_rows=3)
+    listener.submit("ls")
+    listing = listing_owners(listener)[0]
+    member = one_presentation(listener, listener.types.file)
+    assert listener.begin_listing_narrow(listing)
+    assert listener.pending_substring_listing is listing
+    assert not listener.execute_stored_member(member, "show")
+    assert not listener.begin_listing_narrow(listing)
+    listener.cancel()
+
+    listener._append_error("evict one")
+    listener._append_error("evict two")
+    listener._append_error("evict three")
+    assert listing.header_presentation not in listener.history.presentations
+    assert member not in listener.history.presentations
+    assert not listener.begin_listing_narrow(listing)
+    assert not listener.execute_stored_member(member, "show")

@@ -633,6 +633,56 @@ class HeadlessListener:
     ) -> bool:
         return self.select(presentation, label)
 
+    def execute_stored_member(
+        self, presentation: Presentation, command_name: str
+    ) -> bool:
+        """Run a member command using its exact currently retained reference."""
+
+        if (
+            self.pending_request is not None
+            or self._pending_substring_listing is not None
+        ):
+            return False
+        if presentation not in self._history.presentations:
+            return False
+        allowed = {
+            self._types.file: (FileRef, frozenset({"show", "rm"})),
+            self._types.directory: (
+                DirectoryRef,
+                frozenset({"show", "cd", "ls"}),
+            ),
+            self._types.process: (ProcessRef, frozenset({"show", "kill"})),
+        }
+        rule = allowed.get(presentation.presentation_type)
+        if (
+            rule is None
+            or type(presentation.value) is not rule[0]
+            or command_name not in rule[1]
+        ):
+            return False
+        self._run_typed(
+            command_name,
+            TypedDomainValue(presentation.presentation_type, presentation.value),
+        )
+        return True
+
+    def begin_listing_narrow(self, listing: DirectoryListing | ProcessListing) -> bool:
+        """Bind modal substring input to an exact retained listing header."""
+
+        if type(listing) not in {DirectoryListing, ProcessListing}:
+            raise TypeError(
+                "listing must be exactly DirectoryListing or ProcessListing"
+            )
+        if (
+            self.pending_request is not None
+            or self._pending_substring_listing is not None
+        ):
+            return False
+        if listing.header_presentation not in self._history.presentations:
+            return False
+        self._begin_substring_accept(listing)
+        return True
+
     def _translate_show(self, value: object) -> None:
         self._command_show(value)
 

@@ -20,6 +20,7 @@ from pbui.commands import HeadlessListener, InspectedProcess, RootedFilesystem
 from pbui.domain import DirectoryRef, FileRef, ProcessRef
 from pbui.substrate import Chip, Presentation, PresentationType
 from pbui.terminal import (
+    ActionMenu,
     CommandInput,
     DocumentationLine,
     HistorySurface,
@@ -213,6 +214,13 @@ def _mouse_event(
     return event_type(**arguments)
 
 
+def _click_menu_label(menu, label):
+    index = menu.labels.index(label)
+    menu.scroll_to(y=index, animate=False, force=True, immediate=True)
+    y = index - int(menu.scroll_y)
+    menu.on_click(_mouse_event(events.Click, menu, 0, y, button=1))
+
+
 @pytest.mark.asyncio
 async def test_empty_app_mounts_exact_fixed_regions(tmp_path):
     listener = make_listener(tmp_path)
@@ -224,15 +232,19 @@ async def test_empty_app_mounts_exact_fixed_regions(tmp_path):
         children = list(app.screen.children)
         assert [type(child) for child in children] == [
             HistorySurface,
+            ActionMenu,
             DocumentationLine,
             CommandInput,
         ]
         assert [child.id for child in children] == [
             "history",
+            "action-menu",
             "documentation",
             "command-input",
         ]
-        history, documentation, command = children
+        history, menu, documentation, command = children
+        assert menu.region.height == 0
+        assert not menu.is_open
         assert documentation.region.height == 1
         assert command.region.height == 1
         assert history.region.height == 10
@@ -1645,6 +1657,11 @@ async def test_coordinates_hover_click_selection_and_literal_misses(tmp_path, mo
         surface.on_click(
             _mouse_event(events.Click, surface, x, y, button=1, chain=1)
         )
+        assert calls == []
+        assert not app.screen.action_menu.is_open
+        surface.on_click(
+            _mouse_event(events.Click, surface, x, y, button=1, chain=1)
+        )
         assert calls == [(target_presentation, "file with space")]
 
 
@@ -1757,6 +1774,467 @@ async def test_wheel_moves_three_rows_and_recomputes_hover(tmp_path):
         surface.post_message(_mouse_event(events.MouseScrollUp, surface, 0, 0))
         await pilot.pause()
         assert int(surface.scroll_y) == 0
+
+
+@pytest.mark.asyncio
+async def test_action_menu_private_presentations_labels_hits_and_documentation(tmp_path):
+    (tmp_path / "file name").write_text("x")
+    (tmp_path / "directory").mkdir()
+    listener = make_listener(tmp_path)
+    listener.submit("ls")
+    listener.submit("ps")
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(100, 9)) as pilot:
+        screen = app.screen
+        menu = screen.action_menu
+        original_registry = tuple(listener.registry)
+        original_history = listener.history.rows
+        targets = (
+            (listener.types.file, ("show", "rm")),
+            (listener.types.directory, ("show", "cd", "ls")),
+            (listener.types.process, ("show", "kill")),
+            (
+                listener.types.directory_listing,
+                ("sort name", "sort size", "sort mtime", "only files",
+                 "only directories", "narrow", "widen"),
+            ),
+            (
+                listener.types.process_listing,
+                ("sort pid", "sort state", "sort command", "only running",
+                 "only sleeping", "only disk-sleep", "only stopped",
+                 "only tracing", "only zombie", "only dead", "only idle",
+                 "only unknown", "narrow", "widen"),
+            ),
+        )
+        for presentation_type, labels in targets:
+            target = next(
+                item for item in listener.history.presentations
+                if item.presentation_type is presentation_type
+            )
+            screen.open_menu(target)
+            await pilot.pause()
+            assert menu.is_open
+            assert menu.labels == labels
+            assert len(menu.item_presentations) == len(labels)
+            assert all(item.presentation_type is menu.menu_type for item in menu.item_presentations)
+            assert all(item.value.target is target for item in menu.item_presentations)
+            assert all(item.value.label == label for item, label in zip(menu.item_presentations, labels))
+            assert screen.documentation_line.sentence == (
+                "Point at an action and click; Ctrl-G or Esc closes the menu."
+            )
+            assert menu.region.y + menu.region.height == screen.documentation_line.region.y
+            assert menu.region.height == min(len(labels), 6)
+            assert menu.presentation_at_content_offset(0, 0) is menu.item_presentations[0]
+            assert menu.presentation_at_content_offset(
+                menu.scrollable_content_region.width - 1, 0
+            ) is menu.item_presentations[0]
+            menu.on_mouse_move(_mouse_event(events.MouseMove, menu, 0, 0))
+            process_pid = next(
+                item.value.pid for item in listener.history.presentations
+                if item.presentation_type is listener.types.process
+            )
+            expected_documentation = {
+                listener.types.file: f"Click to run “{labels[0]}” for file “file name”.",
+                listener.types.directory: f"Click to run “{labels[0]}” for directory “directory”.",
+                listener.types.process: f"Click to run “{labels[0]}” for process {process_pid}.",
+                listener.types.directory_listing: f"Click to apply “{labels[0]}” to this directory listing.",
+                listener.types.process_listing: f"Click to apply “{labels[0]}” to this process listing.",
+            }[presentation_type]
+            assert screen.documentation_line.sentence == expected_documentation
+            if len(labels) > menu.region.height:
+                menu.scroll_to(y=len(labels), animate=False, force=True, immediate=True)
+                assert menu.presentation_at_content_offset(0, menu.region.height - 1) is menu.item_presentations[-1]
+            if presentation_type is listener.types.process_listing:
+                await pilot.resize_terminal(100, 5)
+                await pilot.pause()
+                assert menu.region.height == 2
+                assert screen.documentation_line.region.y == 3
+                assert screen.command_input.region.y == 4
+                menu.scroll_to(y=len(labels), animate=False, force=True, immediate=True)
+                assert menu.presentation_at_content_offset(0, 1) is menu.item_presentations[-1]
+                await pilot.resize_terminal(100, 9)
+                await pilot.pause()
+            screen.close_menu()
+            await pilot.pause()
+            assert menu.region.height == 0
+            assert menu.item_presentations == ()
+        assert tuple(listener.registry) == original_registry
+        assert listener.history.rows == original_history
+        assert all(item.presentation_type is not menu.menu_type for item in listener.history.presentations)
+
+
+@pytest.mark.asyncio
+async def test_action_menu_gestures_refusals_modal_and_close_boundaries(tmp_path):
+    (tmp_path / "file").write_text("x")
+    listener = make_listener(tmp_path)
+    listener.submit("ls")
+    listener._append_text("text")
+    listener._append_error("error")
+    context = DrawingContext()
+    unrelated_type = PresentationType("Other")
+    context.register_drawer(unrelated_type, lambda value, _context: value)
+    listener.history.append(context.present_row("other", unrelated_type))
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(65, 12)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        menu = screen.action_menu
+        file_target = next(
+            item for item in listener.history.presentations
+            if item.presentation_type is listener.types.file
+        )
+        interval = file_target.intervals[0]
+        y = interval.physical_row - int(surface.scroll_y)
+        x = min(interval.end_column - 1, 25)
+        surface.on_click(_mouse_event(events.Click, surface, x, y, button=3))
+        await pilot.pause()
+        assert menu.target is file_target
+        assert menu.labels == ("show", "rm")
+        surface.on_click(_mouse_event(events.Click, surface, x, y, button=1, chain=2))
+        assert menu.is_open
+        assert screen.documentation_line.sentence.startswith("Point at an action")
+        surface.on_leave(events.Leave(surface))
+        assert menu.is_open
+        menu.on_mouse_move(_mouse_event(events.MouseMove, menu, 0, 0))
+        assert screen.documentation_line.sentence == "Click to run “show” for file “file”."
+        menu.on_leave(events.Leave(menu))
+        await pilot.pause()
+        assert not menu.is_open
+
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        assert menu.target is file_target
+        listener.set_input_text("untouched")
+        revision = listener.history.revision
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert not menu.is_open
+        assert listener.input_text == "untouched"
+        assert listener.history.revision == revision
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        assert menu.is_open
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not menu.is_open
+        assert listener.input_text == "untouched"
+
+        for target, expected in (
+            (None, "Point at a presentation before opening an action menu."),
+            (next(item for item in listener.history.presentations if item.presentation_type is listener.types.text), "Text has no action menu."),
+            (next(item for item in listener.history.presentations if item.presentation_type is listener.types.error), "Error has no action menu."),
+            (next(item for item in listener.history.presentations if item.presentation_type is unrelated_type), "This presentation has no action menu."),
+        ):
+            screen.open_menu(target)
+            assert not menu.is_open
+            assert screen.documentation_line.sentence == expected
+            screen.synchronize()
+            assert screen.documentation_line.sentence == expected
+        text_target = next(
+            item for item in listener.history.presentations
+            if item.presentation_type is listener.types.text
+        )
+        text_interval = text_target.intervals[0]
+        surface.on_mouse_move(
+            _mouse_event(
+                events.MouseMove, surface, text_interval.start_column,
+                text_interval.physical_row - int(surface.scroll_y),
+            )
+        )
+        assert screen.documentation_line.sentence == "Text has no default click action."
+        screen.open_menu(None)
+        assert screen.documentation_line.sentence.startswith("Point at a presentation")
+        listener.set_input_text("changed")
+        screen.synchronize()
+        assert screen.documentation_line.sentence == "Text has no default click action."
+
+        listener.submit("rm")
+        screen.synchronize()
+        pending = listener.pending_request
+        documentation = screen.documentation_line.sentence
+        screen.open_menu(file_target)
+        await pilot.press("ctrl+o")
+        surface.on_click(_mouse_event(events.Click, surface, x, y, button=3))
+        assert not menu.is_open
+        assert listener.pending_request is pending
+        assert screen.documentation_line.sentence == documentation
+        listener.cancel()
+        listener.submit("narrow")
+        screen.synchronize()
+        pending_listing = listener.pending_substring_listing
+        documentation = screen.documentation_line.sentence
+        screen.open_menu(file_target)
+        await pilot.press("ctrl+o")
+        surface.on_click(_mouse_event(events.Click, surface, x, y, button=3))
+        assert not menu.is_open
+        assert listener.pending_substring_listing is pending_listing
+        assert screen.documentation_line.sentence == documentation
+
+
+@pytest.mark.asyncio
+async def test_action_menu_older_listing_view_actions_and_bound_narrow(tmp_path):
+    (tmp_path / "large").write_text("12345")
+    (tmp_path / "small").write_text("x")
+    (tmp_path / "directory").mkdir()
+    listener = make_listener(tmp_path)
+    listener.submit("ls")
+    directory_listing = listener.history.rows[0].listing_owner
+    listener.submit("ps")
+    process_listing = next(
+        row.listing_owner for row in listener.history.rows
+        if row.listing_owner is not directory_listing
+    )
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(100, 24)) as pilot:
+        screen = app.screen
+        menu = screen.action_menu
+        header = directory_listing.header_presentation
+        process_rows = tuple(
+            row for row in listener.history.rows if row.listing_owner is process_listing
+        )
+        for label, view_field, expected in (
+            ("sort size", "sort_key", "size"),
+            ("only files", "kind_filter", "files"),
+            ("widen", "kind_filter", None),
+        ):
+            screen.open_menu(header)
+            await pilot.pause()
+            _click_menu_label(menu, label)
+            await pilot.pause()
+            assert getattr(directory_listing.view, view_field) == expected
+            assert process_listing.view.sort_key == "pid"
+            assert tuple(row for row in listener.history.rows if row.listing_owner is process_listing) == process_rows
+            assert {row.listing_owner for row in listener.history.rows} == {
+                directory_listing, process_listing
+            }
+            assert not menu.is_open
+
+        screen.open_menu(header)
+        await pilot.pause()
+        _click_menu_label(menu, "narrow")
+        await pilot.pause()
+        assert listener.pending_substring_listing is directory_listing
+        assert screen.command_input.display_text.endswith("narrow ")
+        listener.set_input_text("small")
+        await pilot.press("enter")
+        assert directory_listing.view.substring_filter == "small"
+        assert process_listing.view.substring_filter is None
+        assert tuple(row for row in listener.history.rows if row.listing_owner is process_listing) == process_rows
+
+        screen.open_menu(process_listing.header_presentation)
+        await pilot.pause()
+        _click_menu_label(menu, "only sleeping")
+        await pilot.pause()
+        assert process_listing.view.kind_filter == "sleeping"
+        assert directory_listing.view.kind_filter is None
+
+
+@pytest.mark.asyncio
+async def test_action_menu_member_actions_outside_click_and_stale_target(tmp_path):
+    file_path = tmp_path / "file"
+    file_path.write_text("payload")
+    directory = tmp_path / "child"
+    directory.mkdir()
+    (directory / "nested").write_text("x")
+    processes = FixedProcesses(
+        records={42: InspectedProcess(42, 1000, "sleeping", "worker")}
+    )
+    listener = HeadlessListener(str(tmp_path), RootedFilesystem(tmp_path), processes)
+    listener.submit("ls")
+    listing = listener.history.rows[0].listing_owner
+    listener.submit("ps")
+    file_target = next(
+        item for item in listener.history.presentations
+        if item.presentation_type is listener.types.file
+    )
+    directory_target = next(
+        item for item in listener.history.presentations
+        if item.presentation_type is listener.types.directory
+    )
+    process_target = next(
+        item for item in listener.history.presentations
+        if item.presentation_type is listener.types.process
+    )
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(100, 20)) as pilot:
+        screen = app.screen
+        menu = screen.action_menu
+        screen.open_menu(file_target)
+        await pilot.pause()
+        rows_before = listener.history.rows
+        interval = file_target.intervals[0]
+        screen.history_surface.on_click(
+            _mouse_event(
+                events.Click, screen.history_surface,
+                interval.start_column,
+                interval.physical_row - int(screen.history_surface.scroll_y),
+                button=1,
+            )
+        )
+        await pilot.pause()
+        assert not menu.is_open
+        assert listener.history.rows == rows_before
+        assert file_path.exists()
+
+        for target, label in (
+            (file_target, "show"),
+            (directory_target, "show"),
+            (process_target, "show"),
+        ):
+            screen.open_menu(target)
+            await pilot.pause()
+            revision = listener.history.revision
+            _click_menu_label(menu, label)
+            await pilot.pause()
+            assert listener.history.revision == revision + 1
+            assert not menu.is_open
+
+        screen.open_menu(directory_target)
+        await pilot.pause()
+        before = len(listener.history.rows)
+        _click_menu_label(menu, "ls")
+        await pilot.pause()
+        assert len(listener.history.rows) > before
+        newest_listing = next(
+            row.listing_owner for row in reversed(listener.history.rows)
+            if row.listing_owner is not None
+        )
+        assert newest_listing is not listing
+        assert newest_listing.directory is directory_target.value
+
+        screen.open_menu(directory_target)
+        await pilot.pause()
+        _click_menu_label(menu, "cd")
+        await pilot.pause()
+        assert listener.cwd == str(directory)
+
+        screen.open_menu(process_target)
+        await pilot.pause()
+        _click_menu_label(menu, "kill")
+        await pilot.pause()
+        assert processes.sent == [(42, signal.SIGTERM)]
+
+        screen.open_menu(file_target)
+        await pilot.pause()
+        _click_menu_label(menu, "rm")
+        await pilot.pause()
+        assert not file_path.exists()
+
+        screen.open_menu(process_target)
+        await pilot.pause()
+        for index in range(501):
+            listener._append_error(f"eviction {index}")
+        revision = listener.history.revision
+        _click_menu_label(menu, "kill")
+        await pilot.pause()
+        assert listener.history.revision == revision
+        assert processes.sent == [(42, signal.SIGTERM)]
+
+
+@pytest.mark.asyncio
+async def test_action_menu_open_close_and_view_keep_wrapped_viewport_anchor(tmp_path):
+    (tmp_path / "long-file-name-for-wrapping").write_text("12345")
+    listener = make_listener(tmp_path)
+    _append_plain_rows(listener, 15, prefix="before-long-text")
+    listener.submit("ls")
+    listing = next(row.listing_owner for row in listener.history.rows if row.listing_owner)
+    member = listing.member_presentations[0]
+    member_row = next(row for row in listener.history.rows if member in row.presentations)
+    _append_plain_rows(listener, 25, prefix="after-long-text")
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(25, 9)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        first = _first_physical_row(surface, member_row)
+        assert surface.current_layout.rows[first + 1].logical_row == surface.current_layout.rows[first].logical_row
+        surface.scroll_to_row(first + 1)
+        assert _top_logical_row(surface) is member_row
+        assert int(surface.scroll_y) == first + 1
+        hit = surface.presentation_at_content_offset(0, 0)
+        assert hit is member
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, 0))
+        surface.on_click(_mouse_event(events.Click, surface, 0, 0, button=3))
+        await pilot.pause()
+        assert screen.action_menu.target is member
+        assert _top_logical_row(surface) is member_row
+        assert int(surface.scroll_y) == first + 1
+        assert surface.hovered_presentation is surface.presentation_at_content_offset(0, 0)
+        screen.action_menu.on_mouse_move(
+            _mouse_event(events.MouseMove, screen.action_menu, 0, 0)
+        )
+        surface.on_leave(events.Leave(surface))
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert _top_logical_row(surface) is member_row
+        assert int(surface.scroll_y) == first + 1
+        pointer = screen._pointer_screen
+        region = surface.scrollable_content_region
+        assert pointer in region
+        assert surface.hovered_presentation is surface.presentation_at_content_offset(
+            pointer.x - region.x, pointer.y - region.y
+        )
+        assert screen.documentation_line.sentence == format_documentation(
+            listener, surface.hovered_presentation, surface.pointer_logical_column
+        )
+
+        screen.open_menu(listing.header_presentation)
+        await pilot.pause()
+        _click_menu_label(screen.action_menu, "sort size")
+        await pilot.pause()
+        assert listing.view.sort_key == "size"
+        assert _top_logical_row(surface).listing_owner is listing
+        assert int(surface.scroll_y) == _first_physical_row(surface, _top_logical_row(surface)) + 1
+
+        screen.open_menu(member)
+        await pilot.pause()
+        _click_menu_label(screen.action_menu, "show")
+        await pilot.pause()
+        assert int(surface.scroll_y) == surface._clamp_scroll_row(
+            len(surface.current_layout.rows)
+        )
+
+
+@pytest.mark.asyncio
+async def test_action_menu_hover_repaints_only_item_rows(tmp_path, monkeypatch):
+    (tmp_path / "file").write_text("x")
+    listener = make_listener(tmp_path)
+    listener.submit("ls")
+    _append_plain_rows(listener, 300)
+    header = next(
+        item for item in listener.history.presentations
+        if item.presentation_type is listener.types.directory_listing
+    )
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(70, 12)) as pilot:
+        screen = app.screen
+        screen.open_menu(header)
+        await pilot.pause()
+        menu = screen.action_menu
+        history = screen.history_surface
+        refreshed = []
+        original_refresh = menu.refresh
+
+        def record_refresh(*regions, **kwargs):
+            refreshed.extend(regions)
+            return original_refresh(*regions, **kwargs)
+
+        def forbid_history_rebuild():
+            pytest.fail("menu hover rebuilt history rows")
+
+        monkeypatch.setattr(menu, "refresh", record_refresh)
+        monkeypatch.setattr(history, "_build_all_rows", forbid_history_rebuild)
+        menu.on_mouse_move(_mouse_event(events.MouseMove, menu, 0, 0))
+        menu.on_mouse_move(_mouse_event(events.MouseMove, menu, 0, 1))
+        assert [region.y for region in refreshed] == [0, 0, 1]
+        assert all(region.height == 1 for region in refreshed)
+        assert menu.hovered_presentation is menu.item_presentations[1]
 
 
 def test_main_composes_runs_and_catches_only_keyboard_interrupt(tmp_path, monkeypatch):
