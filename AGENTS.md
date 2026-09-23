@@ -60,12 +60,12 @@ program with a Lisp machine or a CLIM port.
   not the goal.
 
 For implementation of the program as it stands, the accepted
-specification is `docs/design/implementation/listener/spec.md`. The
-charter beside it is the original assignment, not the current law.
-The next exploration is
-`docs/design/implementation/listings/charter.md`: tables, an action
-menu, and sort and filter that redisplay an `ls` or `ps` listing.
-Until that exploration has an accepted specification, it is
-discussion, not implementation. Implementers follow one approved
-checkpoint. The checkpoint repeats the `uv` commands for the slice
-it covers.
+specifications are `docs/design/implementation/listener/spec.md` and
+`docs/design/implementation/listings/spec.md`. Their charters are the
+original assignments, not the current law. The next exploration is
+`docs/design/implementation/repl/charter.md`: Python evaluation in
+the listener, with a generic presentation of the value. Chips inside
+a Python expression, SymPy, and pandas are later explorations. Until
+the repl specification is accepted, that work is discussion, not
+implementation. Implementers follow one approved checkpoint. The
+checkpoint repeats the `uv` commands for the slice it covers.
