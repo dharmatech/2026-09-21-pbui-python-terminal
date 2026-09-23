@@ -1945,12 +1945,16 @@ async def test_action_menu_gestures_refusals_modal_and_close_boundaries(tmp_path
                 text_interval.physical_row - int(surface.scroll_y),
             )
         )
-        assert screen.documentation_line.sentence == "Text has no default click action."
+        assert screen.documentation_line.sentence == (
+            "Move the cursor to a Python expression position to insert this value."
+        )
         screen.open_menu(None)
         assert screen.documentation_line.sentence.startswith("Point at a presentation")
         listener.set_input_text("changed")
         screen.synchronize()
-        assert screen.documentation_line.sentence == "Text has no default click action."
+        assert screen.documentation_line.sentence == (
+            "Move the cursor to a Python expression position to insert this value."
+        )
 
         listener.submit(": rm")
         screen.synchronize()
@@ -2294,6 +2298,8 @@ async def test_repl_continuation_prompt_documentation_and_modal_keys(tmp_path):
             assert editor.prompt == "...> "
             assert screen.documentation_line.sentence == (
                 "Python continuation: enter another line; Ctrl-G or Esc discards it."
+                if cancel_key == "ctrl+g" else
+                "Move the cursor to a Python expression position to insert this value."
             )
             before = listener.history.rows
             await pilot.press("ctrl+o")
@@ -2304,7 +2310,7 @@ async def test_repl_continuation_prompt_documentation_and_modal_keys(tmp_path):
                 interval.physical_row - int(screen.history_surface.scroll_y), button=3
             ))
             assert not screen.action_menu.is_open
-            assert screen.documentation_line.sentence.startswith("Python continuation:")
+            assert screen.documentation_line.sentence == "This presentation has no action menu."
             await pilot.press(cancel_key)
             assert app.is_running
             assert listener.pending_python_source == ""
@@ -2368,10 +2374,10 @@ async def test_repl_value_wrapped_hit_click_hover_accept_and_history_order(tmp_p
         assert not screen.action_menu.is_open
         assert screen.documentation_line.sentence == "This presentation has no action menu."
         screen.synchronize()
-        listener.set_input_text("keep input")
+        listener.set_input_text("")
         screen.synchronize()
         surface.on_click(_mouse_event(events.Click, surface, 0, y, button=1))
-        assert listener.input_text == "keep input"
+        assert listener.input_text == ""
         assert listener.history.presentations[-1].type is listener.types.text
         assert listener.history.presentations[-1].value.startswith("list: [")
         listener.cancel()
@@ -2485,8 +2491,7 @@ async def test_ctrl_d_blocks_substring_and_menu_then_exits(tmp_path):
         await pilot.press("escape")
         screen.open_menu(header)
         await pilot.press("ctrl+d")
-        assert app.is_running and screen.action_menu.is_open
-        await pilot.press("escape")
+        assert app.is_running and not screen.action_menu.is_open
         await pilot.press("ctrl+d")
         assert not app.is_running
 
@@ -2528,3 +2533,187 @@ async def test_repl_value_hover_restyles_only_affected_wrapped_rows(tmp_path, mo
         assert refreshed[0] == {interval.physical_row for interval in value.intervals}
         assert refreshed[1] == expected
         assert len(built) < len(surface.current_layout.rows)
+
+
+@pytest.mark.asyncio
+async def test_python_chip_click_draws_atom_and_executes_stored_value(tmp_path):
+    listener = make_listener(tmp_path)
+    listener.submit("2")
+    target = next(p for p in listener.history.presentations if p.type is listener.types.value)
+    app = PbuiApp(listener)
+    async with app.run_test(size=(24, 8)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        editor = screen.command_input
+        listener.set_input_text("10 + ()")
+        editor.cursor_position = 6
+        screen.synchronize()
+        interval = target.intervals[0]
+        y = interval.physical_row - int(surface.scroll_y)
+        surface.on_click(_mouse_event(events.Click, surface, interval.start_column, y, button=1))
+        assert len(listener.python_pieces) == 3
+        assert listener.python_pieces[1].value is target.value
+        assert editor.display_text.count("⟨int 2⟩") == 1
+        assert editor._cursor_index(editor.display_text) == editor.display_text.index("⟨int 2⟩") + len("⟨int 2⟩")
+        assert editor.render_line(0).cell_length == 24
+        await pilot.press("enter")
+        assert listener.history.presentations[-1].value == 12
+        assert listener.python_pieces == ()
+
+        listener.set_input_text("f()")
+        editor.cursor_position = 2
+        screen.synchronize()
+        surface.on_click(_mouse_event(events.Click, surface, interval.start_column, y, button=1))
+        chip = listener.python_pieces[1]
+        assert chip.value is target.value
+        editor.on_paste(events.Paste("xy\nz"))
+        assert listener.input_text == "f(xyz)"
+        await pilot.press("backspace", "backspace", "backspace")
+        assert listener.python_pieces[1] is chip
+        await pilot.press("backspace")
+        assert listener.python_pieces == ("f()",)
+        assert editor.display_text.endswith("f()")
+        surface.on_click(_mouse_event(events.Click, surface, interval.start_column, y, button=1))
+        await pilot.press("left", "delete")
+        assert listener.python_pieces == ("f()",)
+        surface.on_click(_mouse_event(events.Click, surface, interval.start_column, y, button=1))
+        await pilot.press("home", "delete", "delete", "right", "delete")
+        assert len(listener.python_pieces) == 1
+        assert listener.python_pieces[0].value is target.value
+        await pilot.press("ctrl+d")
+        assert app.is_running and len(listener.python_pieces) == 1
+        await pilot.resize_terminal(12, 8)
+        assert editor.render_line(0).cell_length == 12
+
+
+@pytest.mark.asyncio
+async def test_python_click_refusal_documentation_and_continuation(tmp_path):
+    listener = make_listener(tmp_path)
+    listener.submit("2")
+    target = next(p for p in listener.history.presentations if p.type is listener.types.value)
+    app = PbuiApp(listener)
+    async with app.run_test(size=(80, 9)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        editor = screen.command_input
+        interval = target.intervals[0]
+        x, y = interval.start_column, interval.physical_row - int(surface.scroll_y)
+        listener.set_input_text("f()")
+        editor.cursor_position = 2
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
+        screen.synchronize()
+        assert screen.documentation_line.sentence == "Click to insert this value into the expression."
+        before = listener.history.rows
+        surface.on_click(_mouse_event(events.Click, surface, x, y, button=1, chain=2))
+        assert listener.python_pieces == ("f()",)
+        listener.set_input_text('"abc"')
+        editor.cursor_position = 2
+        screen.synchronize()
+        assert screen.documentation_line.sentence == (
+            "This value would be literal text here; move the cursor outside the string or comment."
+        )
+        surface.on_click(_mouse_event(events.Click, surface, x, y, button=1))
+        assert listener.python_pieces == ('"abc"',) and listener.history.rows == before
+        listener.set_input_text("foo")
+        editor.cursor_position = 1
+        screen.synchronize()
+        assert screen.documentation_line.sentence == (
+            "Move the cursor to a Python expression position to insert this value."
+        )
+        surface.on_click(_mouse_event(events.Click, surface, x, y, button=1))
+        assert listener.python_pieces == ("foo",) and listener.history.rows == before
+        listener.set_input_text("f()")
+        editor.cursor_position = 2
+        screen.synchronize()
+        surface.on_click(_mouse_event(events.Click, surface, x, y, button=1))
+        assert listener.python_pieces[1].value is target.value
+        await pilot.press("home", "colon")
+        assert listener.input_mode == "python"
+        assert editor.display_text.endswith(":f(⟨int 2⟩)")
+        await pilot.press("ctrl+g")
+        listener.set_input_text("if True:")
+        editor.cursor_position = len(listener.input_text)
+        await pilot.press("enter")
+        assert editor.prompt == "...> "
+        assert "if True:" not in editor.display_text
+        listener.set_input_text("    10 + ")
+        editor.cursor_position = len(listener.input_text)
+        screen.synchronize()
+        surface.on_click(_mouse_event(events.Click, surface, x, y, button=1))
+        assert listener.python_pieces[-1].value is target.value
+        await pilot.press("enter", "enter")
+        assert listener.history.presentations[-1].value == 12
+        assert listener.pending_python_pieces == ()
+
+
+@pytest.mark.asyncio
+async def test_python_menu_narrow_suspends_and_restores_continuation(tmp_path):
+    (tmp_path / "file").write_text("x")
+    listener = make_listener(tmp_path)
+    listener.submit(":ls")
+    header = next(p for p in listener.history.presentations if p.type is listener.types.directory_listing)
+    listener.submit("2")
+    target = next(p for p in listener.history.presentations if p.type is listener.types.value)
+    app = PbuiApp(listener)
+    async with app.run_test(size=(90, 12)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        editor = screen.command_input
+        listener.set_input_text("if True:")
+        editor.cursor_position = len(listener.input_text)
+        await pilot.press("enter")
+        listener.set_input_text("    10 + ")
+        editor.cursor_position = len(listener.input_text)
+        screen.synchronize()
+        interval = target.intervals[0]
+        surface.on_click(_mouse_event(events.Click, surface, interval.start_column, interval.physical_row - int(surface.scroll_y), button=1))
+        await pilot.press("left")
+        saved = listener.capture_python_input()
+        header_interval = header.intervals[0]
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, header_interval.start_column, header_interval.physical_row - int(surface.scroll_y)))
+        await pilot.press("ctrl+o")
+        assert screen.action_menu.is_open
+        await pilot.pause()
+        _click_menu_label(screen.action_menu, "sort size")
+        assert listener.pending_python_pieces == saved[0]
+        assert listener.python_pieces == saved[1].pieces
+        assert listener.python_cursor == saved[1].cursor
+        await pilot.pause()
+        header_interval = header.intervals[0]
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, header_interval.start_column, header_interval.physical_row - int(surface.scroll_y)))
+        await pilot.press("ctrl+o")
+        assert screen.action_menu.is_open
+        await pilot.press("ctrl+d")
+        assert not screen.action_menu.is_open
+        assert listener.capture_python_input() == saved
+        surface.on_click(_mouse_event(events.Click, surface, header_interval.start_column, header_interval.physical_row - int(surface.scroll_y), button=3))
+        assert screen.action_menu.is_open
+        await pilot.pause()
+        _click_menu_label(screen.action_menu, "narrow")
+        assert listener.pending_substring_listing is not None
+        assert editor.prompt == f"pbui:{tmp_path}> "
+        assert editor.display_text.endswith("narrow ")
+        await pilot.press("enter", "ctrl+d")
+        assert listener.pending_substring_listing is not None and app.is_running
+        surface.on_click(_mouse_event(events.Click, surface, interval.start_column, interval.physical_row - int(surface.scroll_y), button=1))
+        assert listener.pending_substring_listing is not None
+        assert listener.python_pieces == ()
+        await pilot.press("f", "i", "l", "e", "enter")
+        assert listener.pending_substring_listing is None
+        assert listener.pending_python_pieces == saved[0]
+        assert listener.python_pieces == saved[1].pieces
+        assert listener.python_cursor == saved[1].cursor
+        assert editor.has_focus and editor.prompt == "...> "
+        for key in ("ctrl+g", "escape"):
+            screen.open_menu(header)
+            assert screen.action_menu.is_open
+            await pilot.pause()
+            _click_menu_label(screen.action_menu, "narrow")
+            assert listener.pending_substring_listing is not None
+            await pilot.press(key)
+            assert listener.pending_substring_listing is None
+            assert listener.pending_python_pieces == saved[0]
+            assert listener.python_pieces == saved[1].pieces
+            assert listener.python_cursor == saved[1].cursor
+        await pilot.press("ctrl+d")
+        assert listener.pending_python_pieces == () and app.is_running

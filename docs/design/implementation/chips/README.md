@@ -6,11 +6,10 @@ typed, a click inserts the history object into that expression.
 | Artifact | Path |
 |---|---|
 | Charter | [`charter.md`](charter.md) |
-| Spec | `spec.md` (designer writes this; not started) |
-| Checkpoints | `checkpoints/` (one at a time, after the spec) |
+| Spec | [`spec.md`](spec.md) |
+| Checkpoints | [`chips 000`](checkpoints/000-headless-pieces-and-splicing.md), [`chips 001`](checkpoints/001-screen-and-hand-check.md) |
 
-**Status.** Charter written, waiting for review. No spec, no
-checkpoints.
+**Status.** Implemented through chips 001. The chips exploration is complete.
 
 The program lives at the project root
 (`/home/dharmatech/journal/2026-09-21-pbui-python-terminal/`).

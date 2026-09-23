@@ -110,6 +110,27 @@ class HistoryRow:
         return tuple(_walk_presentation_ids(self.fragments))
 
 
+def logical_presentation_text(
+    history: PresentationHistory, presentation: Presentation
+) -> str | None:
+    """Return the complete retained logical row drawn for this presentation."""
+
+    if history.get_presentation(presentation.id) is not presentation:
+        return None
+
+    def text_of(fragments: Iterable[Fragment]) -> str:
+        return "".join(
+            fragment.text if isinstance(fragment, LiteralFragment)
+            else text_of(fragment.children)
+            for fragment in fragments
+        )
+
+    for row in history.rows:
+        if presentation in row.presentations:
+            return text_of(row.fragments)
+    return None
+
+
 DrawerContent: TypeAlias = str | Fragment | HistoryRow | Sequence[FragmentPart]
 Drawer: TypeAlias = Callable[[Any, "DrawingContext"], DrawerContent]
 

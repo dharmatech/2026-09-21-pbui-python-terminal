@@ -246,10 +246,22 @@ def format_documentation(
 ) -> str:
     """Return the exact documentation sentence for the current pointer state."""
 
-    if listener.pending_python_source:
-        return _CONTINUATION_DOCUMENTATION
     if listener.pending_substring_listing is not None:
         return _SUBSTRING_DOCUMENTATION
+    if (
+        listener.pending_request is None
+        and listener.input_mode == "python"
+        and presentation is not None
+    ):
+        reason = listener.python_insertion_reason(presentation)
+        if reason == "valid":
+            return "Click to insert this value into the expression."
+        if reason == "literal":
+            return "This value would be literal text here; move the cursor outside the string or comment."
+        if reason == "expression":
+            return "Move the cursor to a Python expression position to insert this value."
+    if listener.pending_python_source and presentation is None:
+        return _CONTINUATION_DOCUMENTATION
 
     kind = _domain_kind(listener, presentation)
     request = listener.pending_request
@@ -398,7 +410,7 @@ def format_documentation(
 def format_prompt(listener: HeadlessListener) -> str:
     """Return the literal prompt derived from the listener's own cwd."""
 
-    if listener.pending_python_source:
+    if listener.pending_substring_listing is None and listener.pending_python_source:
         return "...> "
     return f"pbui:{escape_display(listener.cwd)}> "
 
@@ -926,8 +938,7 @@ class HistorySurface(ScrollView):
         if (
             event.button == 3
             and (
-                self.listener.pending_python_source
-                or self.listener.pending_request is not None
+                self.listener.pending_request is not None
                 or self.listener.pending_substring_listing is not None
             )
         ):
@@ -960,7 +971,7 @@ class HistorySurface(ScrollView):
             label = _pid(presentation)
 
         revision = self.listener.history.revision
-        selected = self.listener.select(presentation, label)
+        selected = self.listener.select_for_input(presentation, label)
         if isinstance(self.screen, ListenerScreen):
             self.screen.synchronize(
                 reveal_newest=(
@@ -1275,7 +1286,13 @@ class CommandInput(Widget):
         self._cursor_position = len(listener.input_text)
 
     @property
+    def _python_editing(self) -> bool:
+        return self.listener.chip is None and self.listener.input_mode in {"python", "empty"}
+
+    @property
     def cursor_position(self) -> int:
+        if self._python_editing:
+            return self.listener.python_cursor
         return min(self._cursor_position, len(self.listener.input_text))
 
     @cursor_position.setter
@@ -1283,13 +1300,20 @@ class CommandInput(Widget):
         if type(position) is not int:
             raise TypeError("cursor position must be an integer")
         self._cursor_position = min(max(0, position), len(self.listener.input_text))
+        if self.listener.pending_substring_listing is None:
+            self.listener.set_python_cursor(self._cursor_position)
         self.refresh()
 
     def set_cursor_position(self, position: int) -> None:
         self.cursor_position = position
 
     def clamp_cursor(self) -> None:
-        self.cursor_position = self._cursor_position
+        if self._python_editing:
+            self._cursor_position = self.listener.python_cursor
+            self.refresh()
+        else:
+            self._cursor_position = min(self._cursor_position, len(self.listener.input_text))
+            self.refresh()
 
     def _synchronize(self, *, reveal_newest: bool = False) -> None:
         if self.is_mounted and isinstance(self.screen, ListenerScreen):
@@ -1303,6 +1327,11 @@ class CommandInput(Widget):
         self._synchronize()
 
     def _insert(self, inserted: str) -> None:
+        if self._python_editing:
+            self.listener.insert_python_text(inserted)
+            self._cursor_position = self.listener.python_cursor
+            self._synchronize()
+            return
         position = self.cursor_position
         text = self.listener.input_text
         self._set_edited_text(
@@ -1318,44 +1347,63 @@ class CommandInput(Widget):
 
     def on_key(self, event: events.Key) -> None:
         key = event.key
+        python = self._python_editing
         position = self.cursor_position
-        text = self.listener.input_text
+        value = self.listener.input_text
 
-        if key == "left":
-            self.cursor_position = position - 1
-            self._synchronize()
-        elif key == "right":
-            self.cursor_position = position + 1
-            self._synchronize()
-        elif key == "home":
-            self.cursor_position = 0
-            self._synchronize()
-        elif key == "end":
-            self.cursor_position = len(text)
+        if key in {"left", "right", "home", "end"}:
+            if python:
+                {
+                    "left": self.listener.python_left,
+                    "right": self.listener.python_right,
+                    "home": self.listener.python_home,
+                    "end": self.listener.python_end,
+                }[key]()
+                self._cursor_position = self.listener.python_cursor
+            else:
+                self.cursor_position = (
+                    position - 1 if key == "left" else
+                    position + 1 if key == "right" else
+                    0 if key == "home" else len(value)
+                )
             self._synchronize()
         elif key == "backspace":
-            if (
+            if python:
+                self.listener.python_backspace()
+                self._cursor_position = self.listener.python_cursor
+                self._synchronize()
+            elif (
                 self.listener.chip is not None
-                and position == len(text)
+                and position == len(value)
                 and self.listener.backspace_chip()
             ):
                 self._synchronize()
             elif position > 0:
                 self._set_edited_text(
-                    text[: position - 1] + text[position:], position - 1
+                    value[:position - 1] + value[position:], position - 1
                 )
             else:
                 self._synchronize()
         elif key == "delete":
-            if position < len(text):
-                self._set_edited_text(text[:position] + text[position + 1 :], position)
+            if python:
+                self.listener.python_delete()
+                self._cursor_position = self.listener.python_cursor
+                self._synchronize()
+            elif position < len(value):
+                self._set_edited_text(value[:position] + value[position + 1:], position)
             else:
                 self._synchronize()
         elif key == "enter":
             before_rows = self.listener.history.rows
             revision = self.listener.history.revision
-            self.listener.submit(self.listener.input_text)
-            self.cursor_position = len(self.listener.input_text)
+            if python:
+                self.listener.submit()
+            else:
+                self.listener.submit(self.listener.input_text)
+            self._cursor_position = (
+                self.listener.python_cursor if self._python_editing
+                else len(self.listener.input_text)
+            )
             self._synchronize(
                 reveal_newest=(
                     self.listener.history.revision != revision
@@ -1382,8 +1430,29 @@ class CommandInput(Widget):
             else ""
         )
 
+    def _python_body_and_cursor(self) -> tuple[str, int]:
+        body: list[str] = []
+        offset = 0
+        atom_position = 0
+        cursor_offset = 0
+        for piece in self.listener.python_pieces:
+            atoms = piece if isinstance(piece, str) else (piece,)
+            for atom in atoms:
+                if atom_position == self.listener.python_cursor:
+                    cursor_offset = offset
+                drawing = atom if isinstance(atom, str) else f"⟨{atom.label}⟩"
+                body.append(drawing)
+                offset += len(drawing)
+                atom_position += 1
+        if atom_position == self.listener.python_cursor:
+            cursor_offset = offset
+        return "".join(body), cursor_offset
+
     @property
     def display_text(self) -> str:
+        if self._python_editing:
+            body, _ = self._python_body_and_cursor()
+            return self.prompt + body
         text = self.prompt + self.editor_prefix + self.listener.input_text
         chip = self.listener.chip
         if chip is not None and self.listener.pending_substring_listing is None:
@@ -1392,16 +1461,18 @@ class CommandInput(Widget):
 
     def _cursor_index(self, text: str) -> int:
         input_start = len(self.prompt) + len(self.editor_prefix)
-        position = self.cursor_position
-        input_text = self.listener.input_text
-        if position < len(input_text):
-            candidate = input_start + position
+        if self._python_editing:
+            _, offset = self._python_body_and_cursor()
+            candidate = input_start + offset
+        else:
+            candidate = input_start + self.cursor_position
+        if candidate < len(text):
             if _character_width(text[candidate]) > 0:
                 return candidate
             for index in range(candidate - 1, input_start - 1, -1):
                 if _character_width(text[index]) > 0:
                     return index
-        return input_start + len(input_text)
+        return candidate
 
     @property
     def renderable(self) -> Text:
@@ -1469,7 +1540,9 @@ class ListenerScreen(Screen[None]):
             self.listener.history.revision,
             self.listener.pending_request,
             self.listener.pending_substring_listing,
-            self.listener.pending_python_source,
+            self.listener.pending_python_pieces,
+            self.listener.python_pieces,
+            self.listener.python_cursor,
             self.listener.input_text,
             self.listener.chip,
         )
@@ -1531,7 +1604,6 @@ class ListenerScreen(Screen[None]):
         if (
             self.listener.pending_request is not None
             or self.listener.pending_substring_listing is not None
-            or self.listener.pending_python_source
         ):
             self.documentation_line.set_override(None)
             self.synchronize()
@@ -1574,17 +1646,26 @@ class ListenerScreen(Screen[None]):
             return
         before_rows = self.listener.history.rows
         before_revision = self.listener.history.revision
-        if action.translator_index is not None:
-            self.listener.invoke_python_translator(target, action.translator_index)
-        elif action.operation in {"show", "cd", "rm", "kill", "ls"}:
-            self.listener.execute_stored_member(target, action.operation)
-        elif action.operation == "narrow":
-            self.listener.begin_listing_narrow(target.value)
-        else:
-            self.listener.apply_listing_view(
-                target.value, action.operation, action.argument
-            )
-        self.command_input.cursor_position = len(self.listener.input_text)
+        saved = (
+            self.listener.capture_python_input()
+            if self.listener.input_mode == "python" and action.operation != "narrow"
+            else None
+        )
+        try:
+            if action.translator_index is not None:
+                self.listener.invoke_python_translator(target, action.translator_index)
+            elif action.operation in {"show", "cd", "rm", "kill", "ls"}:
+                self.listener.execute_stored_member(target, action.operation)
+            elif action.operation == "narrow":
+                self.listener.begin_listing_narrow(target.value)
+            else:
+                self.listener.apply_listing_view(
+                    target.value, action.operation, action.argument
+                )
+        finally:
+            if saved is not None:
+                self.listener.restore_python_input(saved)
+        self.command_input.clamp_cursor()
         self.synchronize(
             reveal_newest=(
                 self.listener.history.revision != before_revision
@@ -1652,14 +1733,21 @@ class PbuiApp(App[None], inherit_bindings=False):
 
     def action_cancel_listener(self) -> None:
         screen = self.screen
+        if isinstance(screen, ListenerScreen) and screen.action_menu.is_open:
+            screen.close_menu()
+            return
+        if self.listener.pending_substring_listing is not None:
+            self.listener.cancel()
+            if isinstance(screen, ListenerScreen):
+                screen.command_input.clamp_cursor()
+                screen.command_input.focus()
+                screen.synchronize()
+            return
         if self.listener.pending_python_source:
             self.listener.cancel_python_continuation()
             if isinstance(screen, ListenerScreen):
                 screen.command_input.cursor_position = 0
                 screen.synchronize()
-            return
-        if isinstance(screen, ListenerScreen) and screen.action_menu.is_open:
-            screen.close_menu()
             return
         self.listener.cancel()
         if isinstance(screen, ListenerScreen):
@@ -1671,7 +1759,6 @@ class PbuiApp(App[None], inherit_bindings=False):
         if (
             not isinstance(screen, ListenerScreen)
             or screen.action_menu.is_open
-            or self.listener.pending_python_source
         ):
             return
         surface = screen.history_surface
@@ -1685,11 +1772,17 @@ class PbuiApp(App[None], inherit_bindings=False):
         screen.open_menu(target)
 
     def action_exit_if_empty(self) -> None:
+        if isinstance(self.screen, ListenerScreen) and self.screen.action_menu.is_open:
+            self.screen.close_menu()
+            return
+        if self.listener.pending_substring_listing is not None:
+            return
         if self.listener.pending_python_source:
             self.action_cancel_listener()
             return
         if (
             self.listener.input_text == ""
+            and not self.listener.python_pieces
             and self.listener.chip is None
             and self.listener.pending_request is None
             and self.listener.pending_substring_listing is None

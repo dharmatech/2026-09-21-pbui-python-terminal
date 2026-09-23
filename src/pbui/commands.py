@@ -53,7 +53,8 @@ from pbui.substrate import (
     SubstrateState,
     TranslatorTable,
 )
-from pbui.text import HistoryRow
+from pbui.chips import Piece, PythonChip, PythonLine, insertion_site_reason
+from pbui.text import HistoryRow, logical_presentation_text, truncate_display
 from pbui.repl import PythonEvaluator, ValueClasses, ValueTranslator
 
 
@@ -386,6 +387,8 @@ class HeadlessListener:
         self._history = PresentationHistory(history_max_rows)
         self._contexts = make_domain_drawing_contexts(self._types)
         self._state = SubstrateState()
+        self._python_line = PythonLine()
+        self._suspended_python: tuple[tuple[tuple[Piece, ...], ...], PythonLine] | None = None
         self._pending_substring_listing: DirectoryListing | ProcessListing | None = (
             None
         )
@@ -455,6 +458,102 @@ class HeadlessListener:
         return self._state.input_text
 
     @property
+    def python_pieces(self) -> tuple[Piece, ...]:
+        return self._python_line.pieces
+
+    @property
+    def python_cursor(self) -> int:
+        return self._python_line.cursor
+
+    @property
+    def pending_python_pieces(self) -> tuple[tuple[Piece, ...], ...]:
+        return self._repl.pending_lines
+
+    @property
+    def input_mode(self) -> str:
+        if self._state.pending_request is not None or self._pending_substring_listing is not None:
+            return "command"
+        if self._repl.pending_lines:
+            return "python"
+        if self._python_line.has_chips:
+            return "python"
+        stripped = self._state.input_text.lstrip()
+        return "command" if stripped.startswith(":") else "python" if stripped else "empty"
+
+    def _sync_python_text(self) -> None:
+        self._state.input_text = self._python_line.text
+
+    def insert_python_text(self, text: str) -> None:
+        self._python_line.insert_text(text)
+        self._sync_python_text()
+
+    def set_python_cursor(self, position: int) -> None:
+        if type(position) is not int or not 0 <= position <= len(
+            [atom for piece in self._python_line.pieces for atom in (
+                piece if isinstance(piece, str) else (piece,)
+            )]
+        ):
+            raise ValueError("cursor is outside the Python line")
+        self._python_line.cursor = position
+
+    def capture_python_input(self) -> tuple[tuple[tuple[Piece, ...], ...], PythonLine]:
+        return self._repl.pending_lines, self._python_line
+
+    def restore_python_input(
+        self, saved: tuple[tuple[tuple[Piece, ...], ...], PythonLine]
+    ) -> None:
+        self._repl.pending_lines, self._python_line = saved
+        self._sync_python_text()
+
+    def python_insertion_reason(self, presentation: Presentation | None) -> str:
+        if (
+            presentation is None
+            or self.pending_request is not None
+            or self._pending_substring_listing is not None
+            or self.input_mode != "python"
+            or logical_presentation_text(self._history, presentation) is None
+        ):
+            return "unavailable"
+        return insertion_site_reason(self._repl.pending_lines, self._python_line)
+
+    def python_left(self) -> None:
+        self._python_line.left()
+
+    def python_right(self) -> None:
+        self._python_line.right()
+
+    def python_home(self) -> None:
+        self._python_line.home()
+
+    def python_end(self) -> None:
+        self._python_line.end()
+
+    def python_backspace(self) -> bool:
+        changed = self._python_line.backspace()
+        self._sync_python_text()
+        return changed
+
+    def python_delete(self) -> bool:
+        changed = self._python_line.delete()
+        self._sync_python_text()
+        return changed
+
+    def insert_python_chip(self, presentation: Presentation | None) -> bool:
+        if (
+            presentation is None
+            or self.pending_request is not None
+            or self._pending_substring_listing is not None
+            or self.input_mode != "python"
+        ):
+            return False
+        label = logical_presentation_text(self._history, presentation)
+        if label is None or self.python_insertion_reason(presentation) != "valid":
+            return False
+        self._python_line.insert_chip(PythonChip(presentation.value, truncate_display(label, 32)))
+        self._sync_python_text()
+        return True
+
+    @property
     def pending_request(self) -> AcceptRequest | None:
         return self._state.pending_request
 
@@ -508,6 +607,7 @@ class HeadlessListener:
 
     def cancel_python_continuation(self) -> None:
         self._repl.cancel()
+        self._python_line = PythonLine()
         self._state.input_text = ""
 
     @property
@@ -518,6 +618,7 @@ class HeadlessListener:
         if not isinstance(text, str):
             raise TypeError("input text must be a string")
         self._state.input_text = text
+        self._python_line.set_text(text)
 
     @staticmethod
     def _split_input(line: str) -> tuple[str, str | None] | None:
@@ -543,9 +644,11 @@ class HeadlessListener:
             self._finish_substring_accept()
             return
         submitted = self._state.input_text
-        if self._repl.pending_source:
+        if self._repl.pending_lines or self._python_line.has_chips:
+            pieces = self._python_line.pieces
             self._state.input_text = ""
-            self._repl.submit(submitted)
+            self._python_line = PythonLine()
+            self._repl.submit_pieces(pieces)
             return
         if not submitted.strip():
             return
@@ -556,11 +659,13 @@ class HeadlessListener:
                 command_line = command_line[1:]
             if not command_line.strip():
                 self._state.input_text = ""
+                self._python_line = PythonLine()
                 return
         elif self._state.pending_request is not None:
             command_line = submitted
         else:
             self._state.input_text = ""
+            self._python_line = PythonLine()
             self._repl.submit(submitted)
             return
         parsed = self._split_input(command_line)
@@ -630,6 +735,7 @@ class HeadlessListener:
 
     def _begin_accept(self, command_name: str) -> None:
         self._state.input_text = command_name
+        self._python_line.set_text(command_name)
         self._state.chip = None
 
         def continue_with(chip: Chip) -> None:
@@ -669,21 +775,41 @@ class HeadlessListener:
 
     def _clear_attempt(self) -> None:
         self._state.input_text = ""
+        self._python_line = PythonLine()
         self._state.pending_request = None
         self._state.chip = None
         self._pending_substring_listing = None
 
     def cancel(self) -> None:
+        saved = self._suspended_python
+        self._suspended_python = None
         self._repl.cancel()
         self._state.input_text = ""
+        self._python_line = PythonLine()
         self._state.cancel()
         self._pending_substring_listing = None
+        if saved is not None:
+            self.restore_python_input(saved)
 
     def backspace_chip(self) -> bool:
         return self._state.backspace()
 
+    def select_for_input(
+        self, presentation: Presentation | None, label: str = ""
+    ) -> bool:
+        """Route a headless history selection using modal and input precedence."""
+
+        if self._pending_substring_listing is not None or presentation is None:
+            return False
+        if self._state.pending_request is not None:
+            return self._state.select_presentation(presentation, label)
+        if self.input_mode == "python":
+            return self.insert_python_chip(presentation)
+        return self.select(presentation, label)
+
     def select(self, presentation: Presentation | None, label: str = "") -> bool:
-        if self._pending_substring_listing is not None or self._repl.pending_source:
+        # The current terminal adapter continues to call this legacy route.
+        if self._pending_substring_listing is not None or self._repl.pending_lines:
             return False
         if presentation is None:
             return False
@@ -749,7 +875,11 @@ class HeadlessListener:
             return False
         if listing.header_presentation not in self._history.presentations:
             return False
+        if self.input_mode == "python":
+            self._suspended_python = self.capture_python_input()
         self._begin_substring_accept(listing)
+        if self._suspended_python is not None:
+            self._repl.pending_lines = ()
         return True
 
     def _translate_show(self, value: object) -> None:
@@ -877,7 +1007,11 @@ class HeadlessListener:
         try:
             return self.apply_listing_view(listing, "narrow", substring)
         finally:
+            saved = self._suspended_python
+            self._suspended_python = None
             self._clear_attempt()
+            if saved is not None:
+                self.restore_python_input(saved)
 
     def apply_listing_view(
         self,

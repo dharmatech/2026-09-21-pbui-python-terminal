@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from pbui.chips import Piece, splice
 from pbui.domain import escape_display
 from pbui.substrate import Presentation, PresentationHistory, PresentationType
 from pbui.text import (
@@ -160,7 +161,7 @@ class PythonEvaluator:
         command_names: tuple[str, ...],
     ) -> None:
         self.namespace: dict[str, Any] = {"__name__": "__pbui__"}
-        self.pending_source = ""
+        self.pending_lines: tuple[tuple[Piece, ...], ...] = ()
         self.classes = ValueClasses()
         self._history = history
         self._context = context
@@ -169,25 +170,38 @@ class PythonEvaluator:
         self._append_error = append_error
         self._command_names = command_names
 
+    @property
+    def pending_source(self) -> str:
+        # Retain the chip-free string interface used by the terminal adapter.
+        return "\n".join(
+            "".join(piece if isinstance(piece, str) else f"⟨{piece.label}⟩" for piece in line)
+            for line in self.pending_lines
+        )
+
     def cancel(self) -> None:
-        self.pending_source = ""
+        self.pending_lines = ()
 
     def submit(self, line: str) -> None:
-        source = self.pending_source + "\n" + line if self.pending_source else line
+        self.submit_pieces((line,))
+
+    def submit_pieces(self, line: tuple[Piece, ...]) -> None:
+        lines = self.pending_lines + (line,)
+        source, bindings = splice(lines, self.namespace)
         try:
             compiled = code.compile_command(source, symbol="single")
         except (SyntaxError, OverflowError, ValueError) as error:
-            self.pending_source = ""
+            self.pending_lines = ()
             self._append_error(_compile_error(error))
             return
         if compiled is None:
-            self.pending_source = source
+            self.pending_lines = lines
             return
-        self.pending_source = ""
+        self.pending_lines = ()
         stdout = _LineWriter("", self._append_text)
         stderr = _LineWriter("stderr: ", self._append_text)
         old_hook, old_stdout, old_stderr = sys.displayhook, sys.stdout, sys.stderr
         try:
+            self.namespace.update(bindings)
             sys.displayhook = self._display_hook
             sys.stdout, sys.stderr = stdout, stderr
             try:
@@ -201,6 +215,8 @@ class PythonEvaluator:
                 stderr.finish()
         finally:
             sys.displayhook, sys.stdout, sys.stderr = old_hook, old_stdout, old_stderr
+            for name in bindings:
+                self.namespace.pop(name, None)
 
     def _display_hook(self, value: Any) -> None:
         self.display_value(value)
