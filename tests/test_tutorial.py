@@ -12,8 +12,9 @@ import pytest
 
 from pbui.commands import HeadlessListener, RootedFilesystem
 from pbui.domain import escape_display
+from pbui.http import GetRequest, GetResult, HttpResponse, JsonArray, JsonObject
 from pbui.text import layout, stored_row_text
-from pbui.transcript import CommandInput, PythonInput
+from pbui.transcript import CommandInput, MenuActionInput, PythonInput
 from pbui.tutorial import (
     TutorialCard,
     TutorialLink,
@@ -95,15 +96,18 @@ def transcript(listener):
     )
 
 
-def test_exact_immutable_stack_and_pure_construction(monkeypatch):
+def test_exact_immutable_stack_and_pure_construction(monkeypatch, tmp_path):
     def forbidden(*_args, **_kwargs):
         raise AssertionError("stack construction performed I/O")
 
+    listener = make_listener(tmp_path)
     original_import = builtins.__import__
 
-    def no_sympy_import(name, *args, **kwargs):
+    def no_external_import(name, *args, **kwargs):
         if name == "sympy" or name.startswith("sympy."):
             raise AssertionError("stack construction imported SymPy")
+        if name in {"pbui.http", "urllib.request"}:
+            raise AssertionError("tutorial construction imported HTTP")
         return original_import(name, *args, **kwargs)
 
     with monkeypatch.context() as patch:
@@ -114,8 +118,13 @@ def test_exact_immutable_stack_and_pure_construction(monkeypatch):
         patch.setattr(socket, "create_connection", forbidden)
         patch.setattr(socket, "socket", forbidden)
         patch.setattr(subprocess, "Popen", forbidden)
-        patch.setattr(builtins, "__import__", no_sympy_import)
+        patch.setattr(builtins, "__import__", no_external_import)
         stack = make_tutorial_stack()
+        for card in (stack.sections[2], *stack.http_leaves):
+            append_tutorial_card(
+                listener.history, listener.drawing_contexts.standalone,
+                listener.types, stack, card,
+            )
 
     assert tuple(card.identifier for card in stack.tour) == (
         "presentations", "commands", "values", "menus", "yank"
@@ -166,8 +175,12 @@ def test_exact_immutable_stack_and_pure_construction(monkeypatch):
     assert stack.contents.identifier == "contents"
     assert stack.contents.title == "Contents"
     assert stack.contents.body == ("Choose a card to append it to history.",)
-    assert tuple(card.identifier for card in stack.sections) == ("listener", "sympy")
-    assert tuple(card.title for card in stack.sections) == ("Listener", "SymPy")
+    assert tuple(card.identifier for card in stack.sections) == (
+        "listener", "sympy", "http",
+    )
+    assert tuple(card.title for card in stack.sections) == (
+        "Listener", "SymPy", "HTTP",
+    )
     assert stack.sections[0].body == ("Choose a card to append it to history.",)
     assert stack.sections[1].body == (
         "A SymPy expression stays a live object in history.",
@@ -175,12 +188,21 @@ def test_exact_immutable_stack_and_pure_construction(monkeypatch):
         "Import and a symbol come before the examples.",
         "Up returns here from any of these cards.",
     )
+    assert stack.sections[2].body == (
+        "Requests, responses, and JSON stay as separate objects in history.",
+        "Try starts one public USGS feed; perform is the network step.",
+        "The feed is live, so counts and events can change.",
+        "Up returns here from any of these cards.",
+    )
     assert stack.contents.entries == stack.sections
     assert all(entry is card for entry, card in zip(stack.contents.entries, stack.sections))
     assert stack.sections[0].entries == stack.tour
     assert stack.sections[1].entries == stack.sympy_leaves
+    assert stack.sections[2].entries == stack.http_leaves
     assert all(entry is card for section, leaves in (
-        (stack.sections[0], stack.tour), (stack.sections[1], stack.sympy_leaves)
+        (stack.sections[0], stack.tour),
+        (stack.sections[1], stack.sympy_leaves),
+        (stack.sections[2], stack.http_leaves),
     ) for entry, card in zip(section.entries, leaves))
 
     assert tuple(card.identifier for card in stack.sympy_leaves) == (
@@ -219,8 +241,51 @@ def test_exact_immutable_stack_and_pure_construction(monkeypatch):
         assert card.examples[0].saved_input == PythonInput(((source,),))
         assert len(card.examples) == 1
 
-    for section, leaves in ((stack.sections[0], stack.tour),
-                            (stack.sections[1], stack.sympy_leaves)):
+    assert tuple(card.identifier for card in stack.http_leaves) == (
+        "http-request", "http-perform", "http-json", "http-browse",
+    )
+    assert tuple(card.title for card in stack.http_leaves) == (
+        "1. Make a request", "2. Perform the GET", "3. Open JSON",
+        "4. Browse and reuse",
+    )
+    assert tuple(card.body for card in stack.http_leaves) == (
+        (
+            "Try loads the USGS :get command; Enter runs it.",
+            "The GET row is a retained request, not a response.",
+            "Neither opening this card nor Try fetches anything.",
+        ),
+        (
+            "Open the GET row's menu and choose perform to fetch.",
+            "The request stays; a response or Error appears below it.",
+            "On a response, body shows its decoded text.",
+            "Use json on that same response to open parsed data.",
+        ),
+        (
+            "Open the response row's menu and choose json.",
+            "The new JsonObject summary is the parsed value.",
+            "At an empty prompt, click it to list root members.",
+            'Click ["metadata"] to list title and count.',
+        ),
+        (
+            'From the root members, click ["features"] to list array members.',
+            'If [0] appears, click it, then ["properties"].',
+            "Read place and mag; the events and counts can change.",
+            "To reuse a JSON row, type len(, click it, type ), then Enter.",
+        ),
+    )
+    source = (
+        ":get https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/"
+        "2.5_day.geojson"
+    )
+    assert stack.http_leaves[0].examples[0].source == source
+    assert stack.http_leaves[0].examples[0].saved_input == CommandInput(source[1:])
+    assert tuple(card.examples for card in stack.http_leaves[1:]) == ((), (), ())
+
+    for section, leaves in (
+        (stack.sections[0], stack.tour),
+        (stack.sections[1], stack.sympy_leaves),
+        (stack.sections[2], stack.http_leaves),
+    ):
         assert section.previous is section.next is None
         assert section.contents == TutorialLink("Up", "contents")
         assert stack.get(section.contents.destination_id) is stack.contents
@@ -246,11 +311,13 @@ def test_exact_immutable_stack_and_pure_construction(monkeypatch):
                     assert stack.get(link.destination_id) is expected
     assert stack.contents.previous is stack.contents.next is stack.contents.contents is None
     assert set(card.identifier for card in (
-        *stack.tour, *stack.sympy_leaves, *stack.sections, stack.contents
+        *stack.tour, *stack.sympy_leaves, *stack.http_leaves,
+        *stack.sections, stack.contents,
     )) == {
         "presentations", "commands", "values", "menus", "yank", "listener",
         "sympy", "sympy-import", "sympy-symbol", "sympy-expand",
-        "sympy-factor", "contents",
+        "sympy-factor", "contents", "http", "http-request",
+        "http-perform", "http-json", "http-browse",
     }
     assert stack.get("contents") is stack.contents
     with pytest.raises(KeyError):
@@ -337,14 +404,13 @@ def test_nested_hits_navigation_and_disabled_boundaries(tmp_path):
     assert listener.select_for_input(control(listener, section, "Up"))
     contents = latest_card(listener)
     assert contents.value is listener.tutorial_stack.contents
-    assert len(card_rows(listener, contents)) == 4
-    assert text_rows(listener)[-2:] == ("[Listener]", "[SymPy]")
+    assert len(card_rows(listener, contents)) == 5
+    assert text_rows(listener)[-3:] == ("[Listener]", "[SymPy]", "[HTTP]")
     entries = [
         item for row in card_rows(listener, contents) for item in row.presentations[1:]
     ]
-    assert len(entries) == 2
-    assert entries[0].value.destination is listener.tutorial_stack.sections[0]
-    assert entries[1].value.destination is listener.tutorial_stack.sections[1]
+    assert len(entries) == 3
+    assert tuple(entry.value.destination for entry in entries) == listener.tutorial_stack.sections
     assert listener.select_for_input(entries[0])
     assert latest_card(listener).value is listener.tutorial_stack.sections[0]
     gesture_entry = next(
@@ -367,7 +433,10 @@ def test_nested_hits_navigation_and_disabled_boundaries(tmp_path):
 def test_section_rows_and_stored_control_destinations(tmp_path):
     listener = make_listener(tmp_path)
     stack = listener.tutorial_stack
-    for card in (stack.contents, *stack.sections, *stack.tour, *stack.sympy_leaves):
+    for card in (
+        stack.contents, *stack.sections, *stack.tour,
+        *stack.sympy_leaves, *stack.http_leaves,
+    ):
         outer = listener.append_tutorial_card(card)
         rows = card_rows(listener, outer)
         assert len(rows) <= 20
@@ -380,9 +449,11 @@ def test_section_rows_and_stored_control_destinations(tmp_path):
             if item.type is listener.types.tutorial_target
         ]
         if card is stack.contents:
-            assert tuple(target.label for target in targets) == ("Listener", "SymPy")
+            assert tuple(target.label for target in targets) == (
+                "Listener", "SymPy", "HTTP",
+            )
             assert tuple(target.destination for target in targets) == stack.sections
-            assert text_rows(listener)[-2:] == ("[Listener]", "[SymPy]")
+            assert text_rows(listener)[-3:] == ("[Listener]", "[SymPy]", "[HTTP]")
         elif card in stack.sections:
             assert tuple(target.label for target in targets) == (
                 *(leaf.title for leaf in card.entries), "Up: Contents",
@@ -560,11 +631,16 @@ def test_sympy_try_loads_without_evaluating(tmp_path, card_index, source):
     )
 
 
+@pytest.mark.parametrize("card_kind", ("listener", "http"))
 @pytest.mark.parametrize("busy", ("text", "chip", "continuation", "accept", "substring"))
-def test_try_refuses_busy_editor_without_changes(tmp_path, busy):
+def test_try_refuses_busy_editor_without_changes(tmp_path, busy, card_kind):
     listener = make_listener(tmp_path)
     listener.submit(":tutorial")
-    example = try_control(listener, latest_card(listener))
+    card = (
+        latest_card(listener) if card_kind == "listener"
+        else listener.append_tutorial_card(listener.tutorial_stack.http_leaves[0])
+    )
+    example = try_control(listener, card)
     if busy == "text":
         listener.set_input_text(":ps")
     elif busy == "chip":
@@ -613,3 +689,231 @@ def test_long_card_cuts_at_twenty_rows_without_losing_data(tmp_path):
     assert "… (card text cut)" in drawn[-2]
     assert drawn[-1] == "[Back]  [Next]  [Up: Contents]"
     assert escape_display("unsafe\nline") == "unsafe\\nline"
+
+
+def test_http_navigation_retains_cards_controls_and_editor(tmp_path):
+    calls = []
+
+    def fake_get(request):
+        calls.append(request)
+        raise AssertionError("navigation must not fetch")
+
+    listener = HeadlessListener(
+        str(tmp_path), RootedFilesystem(tmp_path), NoProcesses(),
+        get_transport=fake_get,
+    )
+    stack = listener.tutorial_stack
+    listener.submit(":tutorial")
+    first = latest_card(listener)
+    assert first.value is stack.tour[0]
+    listener.set_input_text("10 + 20")
+    listener.set_python_cursor(3)
+    editor = (listener.input_text, listener.python_pieces, listener.python_cursor)
+    inputs = transcript(listener)
+
+    def open_card(target, expected):
+        before_rows = listener.history.rows
+        before_card = latest_card(listener)
+        assert listener.select_for_input(target)
+        opened = latest_card(listener)
+        assert opened is not before_card
+        assert opened.value is expected
+        assert listener.history.rows[:len(before_rows)] == before_rows
+        assert transcript(listener) == inputs
+        assert (listener.input_text, listener.python_pieces,
+                listener.python_cursor) == editor
+        assert len(card_rows(listener, opened)) <= 20
+        assert calls == []
+        return opened
+
+    listener_section = open_card(control(listener, first, "Up"), stack.sections[0])
+    contents = open_card(control(listener, listener_section, "Up"), stack.contents)
+    entries = [
+        item for row in card_rows(listener, contents)
+        for item in row.presentations[1:]
+        if item.type is listener.types.tutorial_target
+    ]
+    assert tuple(item.value.destination for item in entries) == stack.sections
+    http_section = open_card(entries[2], stack.sections[2])
+    assert http_section.value.previous is http_section.value.next is None
+    assert text_rows(listener)[-5:] == (
+        *(f"[{card.title}]" for card in stack.http_leaves),
+        "[Up: Contents]",
+    )
+    leaf_entries = [
+        item for row in card_rows(listener, http_section)
+        for item in row.presentations[1:]
+        if item.type is listener.types.tutorial_target
+        and item.value.direction == "Contents"
+    ]
+    assert tuple(item.value.destination for item in leaf_entries) == stack.http_leaves
+    first_leaf = open_card(leaf_entries[0], stack.http_leaves[0])
+    assert text_rows(listener)[-2:] == (
+        "[Try] :get https://earthquake.usgs.gov/earthquakes/feed/v1.0/"
+        "summary/2.5_day.geojson",
+        "[Back]  [Next]  [Up: HTTP]",
+    )
+    assert control(listener, first_leaf, "Back").value.destination is None
+    before_rows = listener.history.rows
+    assert not listener.select_for_input(control(listener, first_leaf, "Back"))
+    assert listener.history.rows == before_rows
+    drawing = layout(listener.history, 120)
+    nav_y = next(
+        i for i, row in enumerate(drawing.rows)
+        if row.text == "  [Back]  [Next]  [Up: HTTP]"
+    )
+    assert drawing.hit_test(3, nav_y) is control(listener, first_leaf, "Back")
+    assert drawing.hit_test(8, nav_y) is first_leaf
+
+    current = first_leaf
+    for card in stack.http_leaves[1:]:
+        current = open_card(control(listener, current, "Next"), card)
+    assert control(listener, current, "Next").value.destination is None
+    before_rows = listener.history.rows
+    assert not listener.select_for_input(control(listener, current, "Next"))
+    assert listener.history.rows == before_rows
+    previous = open_card(control(listener, current, "Back"), stack.http_leaves[-2])
+    assert previous.value is stack.http_leaves[-2]
+    http_section_again = open_card(control(listener, previous, "Up"), stack.sections[2])
+    assert http_section_again.value is http_section.value
+    open_card(control(listener, http_section_again, "Up"), stack.contents)
+
+
+def test_http_try_and_fake_response_walkthrough(tmp_path):
+    source = (
+        ":get https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/"
+        "2.5_day.geojson"
+    )
+    body = (
+        b'{"metadata":{"title":"Example feed","count":1},'
+        b'"features":[{"properties":{"place":"Example place","mag":2.8}}]}'
+    )
+    result = GetResult(
+        200, source[5:], {"Content-Type": "application/geo+json"}, body,
+    )
+    calls = []
+
+    def fake_get(request):
+        calls.append(request)
+        return result
+
+    listener = HeadlessListener(
+        str(tmp_path), RootedFilesystem(tmp_path), NoProcesses(),
+        get_transport=fake_get,
+    )
+    stack = listener.tutorial_stack
+    listener.submit(":tutorial")
+    first = latest_card(listener)
+    assert listener.select_for_input(control(listener, first, "Up"))
+    section = latest_card(listener)
+    assert listener.select_for_input(control(listener, section, "Up"))
+    contents = latest_card(listener)
+    http_entry = next(
+        item for row in card_rows(listener, contents)
+        for item in row.presentations[1:]
+        if item.type is listener.types.tutorial_target
+        and item.value.destination is stack.sections[2]
+    )
+    assert listener.select_for_input(http_entry)
+    http_section = latest_card(listener)
+    request_entry = next(
+        item for row in card_rows(listener, http_section)
+        for item in row.presentations[1:]
+        if item.type is listener.types.tutorial_target
+        and item.value.destination is stack.http_leaves[0]
+    )
+    assert listener.select_for_input(request_entry)
+    request_card = latest_card(listener)
+    assert calls == []
+    before_rows = listener.history.rows
+    before_inputs = transcript(listener)
+    assert listener.select_for_input(try_control(listener, request_card))
+    assert listener.input_text == source
+    assert listener.python_pieces == (source,)
+    assert listener.python_cursor == len(source)
+    assert listener.history.rows == before_rows
+    assert transcript(listener) == before_inputs
+    assert calls == []
+
+    listener.submit()
+    assert transcript(listener)[-1].value == CommandInput(source[1:])
+    request = listener.history.rows[-1].presentations[0]
+    request_row = listener.history.rows[-1]
+    assert request.value == GetRequest(source[5:])
+    assert text_rows(listener)[-1] == "GET " + source[5:]
+    assert calls == []
+
+    response = listener.invoke_python_translator(request, 0)
+    assert calls == [request.value]
+    assert isinstance(response.value, HttpResponse)
+    assert response.value.body == body
+    assert any(row is request_row for row in listener.history.rows)
+    assert isinstance(transcript(listener)[-1].value, MenuActionInput)
+    assert transcript(listener)[-1].value.label == "perform"
+    assert transcript(listener)[-1].value.target is request.value
+    response_row = listener.history.rows[-1]
+    assert tuple(item.label for item in listener.python_translators_for(response)) == (
+        "json", "body",
+    )
+
+    parsed = listener.invoke_python_translator(response, 0)
+    assert isinstance(parsed.value, JsonObject)
+    assert isinstance(parsed.value["metadata"], JsonObject)
+    assert isinstance(parsed.value["features"], JsonArray)
+    assert any(row is request_row for row in listener.history.rows)
+    assert any(row is response_row for row in listener.history.rows)
+    assert [item.value.label for item in transcript(listener)
+            if isinstance(item.value, MenuActionInput)] == ["perform", "json"]
+    inputs_after_json = transcript(listener)
+
+    root_start = len(listener.history.rows)
+    assert listener.select_for_input(parsed)
+    metadata_row, features_row = listener.history.rows[root_start:]
+    assert text_rows(listener)[root_start:] == (
+        '["metadata"]  ▸ JsonObject (2 keys)',
+        '["features"]  ▸ JsonArray (1 elements)',
+    )
+    metadata = metadata_row.presentations[0]
+    features = features_row.presentations[0]
+    assert metadata.value is parsed.value["metadata"]
+    assert features.value is parsed.value["features"]
+
+    metadata_start = len(listener.history.rows)
+    assert listener.select_for_input(metadata)
+    assert text_rows(listener)[metadata_start:] == (
+        '["title"]  str \'Example feed\'',
+        '["count"]  int 1',
+    )
+    features_start = len(listener.history.rows)
+    assert listener.select_for_input(features)
+    feature_row = listener.history.rows[features_start]
+    assert text_rows(listener)[features_start:] == (
+        "[0]  ▸ JsonObject (1 keys)",
+    )
+    assert feature_row.presentations[0].value is features.value[0]
+    properties_start = len(listener.history.rows)
+    assert listener.select_for_input(feature_row.presentations[0])
+    properties_row = listener.history.rows[properties_start]
+    assert text_rows(listener)[properties_start:] == (
+        '["properties"]  ▸ JsonObject (2 keys)',
+    )
+    assert properties_row.presentations[0].value is features.value[0]["properties"]
+    member_start = len(listener.history.rows)
+    assert listener.select_for_input(properties_row.presentations[0])
+    assert text_rows(listener)[member_start:] == (
+        '["place"]  str \'Example place\'',
+        '["mag"]  float 2.8',
+    )
+    assert transcript(listener) == inputs_after_json
+    assert calls == [request.value]
+
+
+def test_http_cards_obey_history_row_limit(tmp_path):
+    listener = make_listener(tmp_path)
+    card = listener.tutorial_stack.http_leaves[0]
+    first = listener.append_tutorial_card(card)
+    for _ in range(100):
+        listener.append_tutorial_card(card)
+    assert len(listener.history.rows) <= 500
+    assert first not in listener.history.presentations
+    assert latest_card(listener).value is card

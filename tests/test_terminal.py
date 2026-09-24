@@ -4621,6 +4621,7 @@ async def test_tutorial_subject_stack_screen_controls_and_documentation(tmp_path
             "Choose a card to append it to history.",
             "[Listener]",
             "[SymPy]",
+            "[HTTP]",
         )
         assert {item.value.direction for item in card_targets(contents)} == {"Contents"}
         check_controls(contents)
@@ -4724,3 +4725,202 @@ async def test_tutorial_subject_stack_screen_controls_and_documentation(tmp_path
         await pilot.pause()
         check_controls(last)
         check_controls(contents)
+
+
+@pytest.mark.asyncio
+async def test_tutorial_http_screen_route_controls_and_documentation(tmp_path):
+    def forbidden_transport(_request):
+        raise AssertionError("tutorial screen navigation must not perform a GET")
+
+    listener = make_listener(tmp_path, get_transport=forbidden_transport)
+    listener.submit(":tutorial")
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(120, 24)):
+        screen = app.screen
+        surface = screen.history_surface
+        documentation = screen.documentation_line
+
+        def rows(card):
+            return tuple(row for row in listener.history.rows if card in row.presentations)
+
+        def controls(card):
+            return tuple(
+                item for row in rows(card) for item in row.presentations
+                if item.type in {listener.types.tutorial_target, listener.types.tutorial_try}
+            )
+
+        def target(card, label):
+            return next(
+                item for item in controls(card)
+                if item.type is listener.types.tutorial_target and item.value.label == label
+            )
+
+        def assert_card(card, expected, directions):
+            assert tuple(map(stored_row_text, rows(card))) == expected
+            assert {item.value.direction for item in controls(card)
+                    if item.type is listener.types.tutorial_target} == directions
+            for row in rows(card):
+                physical = _first_physical_row(surface, row)
+                assert surface.current_layout.hit_test(2, physical) is card or any(
+                    surface.current_layout.hit_test(2, physical) is control
+                    for control in controls(card)
+                )
+            for control in controls(card):
+                label = (control.value.label
+                         if control.type is listener.types.tutorial_target else "Try")
+                assert any(f"[{label}]" in stored_row_text(row) for row in rows(card))
+                for interval in control.intervals:
+                    assert surface.current_layout.hit_test(
+                        interval.start_column, interval.physical_row
+                    ) is control
+
+        def open_target(card, label):
+            control = target(card, label)
+            destination = control.value.destination
+            assert destination is not None
+            before = len(listener.history.rows)
+            _tutorial_click(surface, control)
+            opened = _tutorial_presentation(listener, "card")
+            assert opened is not card
+            assert opened.value is destination
+            assert len(listener.history.rows) > before
+            assert card in listener.history.presentations
+            return opened
+
+        first = _tutorial_presentation(listener, "card")
+        assert first.value.title == "1. Presentations"
+        listener_section = open_target(first, "Up: Listener")
+        contents = open_target(listener_section, "Up: Contents")
+        assert_card(contents, (
+            "Contents",
+            "Choose a card to append it to history.",
+            "[Listener]", "[SymPy]", "[HTTP]",
+        ), {"Contents"})
+        http_entry = target(contents, "HTTP")
+        _tutorial_hover(surface, http_entry)
+        assert documentation.sentence == (
+            "TUTORIAL CONTENTS “HTTP” • Left: open • Right: no menu"
+        )
+        _tutorial_click(surface, http_entry, button=3)
+        assert not screen.action_menu.is_open
+        section = open_target(contents, "HTTP")
+        assert_card(section, (
+            "HTTP",
+            "Requests, responses, and JSON stay as separate objects in history.",
+            "Try starts one public USGS feed; perform is the network step.",
+            "The feed is live, so counts and events can change.",
+            "Up returns here from any of these cards.",
+            "[1. Make a request]", "[2. Perform the GET]",
+            "[3. Open JSON]", "[4. Browse and reuse]", "[Up: Contents]",
+        ), {"Contents", "Up"})
+        _tutorial_hover(surface, target(section, "Up: Contents"))
+        assert documentation.sentence == (
+            "TUTORIAL UP “Contents” • Left: open • Right: no menu"
+        )
+        request = open_target(section, "1. Make a request")
+        source = ":get https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson"
+        assert_card(request, (
+            "1. Make a request",
+            "Try loads the USGS :get command; Enter runs it.",
+            "The GET row is a retained request, not a response.",
+            "Neither opening this card nor Try fetches anything.",
+            f"[Try] {source}", "[Back]  [Next]  [Up: HTTP]",
+        ), {"Back", "Next", "Up"})
+        back = target(request, "Back")
+        assert back.value.destination is None
+        assert presentation_style(listener, back, back).dim
+        _tutorial_hover(surface, back)
+        assert documentation.sentence == (
+            "TUTORIAL BACK • Left: this section has no previous card • Right: no menu"
+        )
+        before = listener.history.rows
+        _tutorial_click(surface, back)
+        assert listener.history.rows == before
+        next_link = target(request, "Next")
+        _tutorial_hover(surface, next_link)
+        assert documentation.sentence == (
+            "TUTORIAL NEXT “2. Perform the GET” • Left: open • Right: no menu"
+        )
+        _tutorial_hover(surface, target(request, "Up: HTTP"))
+        assert documentation.sentence == (
+            "TUTORIAL UP “HTTP” • Left: open • Right: no menu"
+        )
+        example = next(item for item in controls(request)
+                       if item.type is listener.types.tutorial_try)
+        example_row = next(row for row in rows(request) if example in row.presentations)
+        example_y = _first_physical_row(surface, example_row)
+        assert surface.current_layout.hit_test(8, example_y) is request
+        nav_y = _first_physical_row(surface, rows(request)[-1])
+        assert surface.current_layout.hit_test(
+            next_link.intervals[0].start_column - 1, nav_y
+        ) is request
+        assert surface.current_layout.hit_test(
+            2, _first_physical_row(surface, rows(request)[0])
+        ) is request
+        assert surface.current_layout.hit_test(
+            2, _first_physical_row(surface, rows(request)[1])
+        ) is request
+        _tutorial_hover(surface, example)
+        assert documentation.sentence == (
+            "TUTORIAL TRY • Left: load example into editor; Enter runs • Right: no menu"
+        )
+        listener.set_input_text("busy")
+        screen.synchronize()
+        _tutorial_hover(surface, example)
+        assert documentation.sentence == (
+            "TUTORIAL TRY • Left: finish or cancel current input before trying • Right: no menu"
+        )
+        listener.cancel()
+        screen.synchronize()
+        _tutorial_click(surface, example, button=3)
+        assert not screen.action_menu.is_open
+        assert listener.input_text == ""
+
+        perform = open_target(request, "Next")
+        assert_card(perform, (
+            "2. Perform the GET",
+            "Open the GET row's menu and choose perform to fetch.",
+            "The request stays; a response or Error appears below it.",
+            "On a response, body shows its decoded text.",
+            "Use json on that same response to open parsed data.",
+            "[Back]  [Next]  [Up: HTTP]",
+        ), {"Back", "Next", "Up"})
+        assert not any(item.type is listener.types.tutorial_try for item in controls(perform))
+        assert target(perform, "Back").value.destination is request.value
+        json_card = open_target(perform, "Next")
+        assert_card(json_card, (
+            "3. Open JSON",
+            "Open the response row's menu and choose json.",
+            "The new JsonObject summary is the parsed value.",
+            "At an empty prompt, click it to list root members.",
+            'Click ["metadata"] to list title and count.',
+            "[Back]  [Next]  [Up: HTTP]",
+        ), {"Back", "Next", "Up"})
+        assert not any(item.type is listener.types.tutorial_try for item in controls(json_card))
+        assert target(json_card, "Back").value.destination is perform.value
+        browse = open_target(json_card, "Next")
+        assert_card(browse, (
+            "4. Browse and reuse",
+            'From the root members, click ["features"] to list array members.',
+            'If [0] appears, click it, then ["properties"].',
+            "Read place and mag; the events and counts can change.",
+            "To reuse a JSON row, type len(, click it, type ), then Enter.",
+            "[Back]  [Next]  [Up: HTTP]",
+        ), {"Back", "Next", "Up"})
+        assert not any(item.type is listener.types.tutorial_try for item in controls(browse))
+        assert target(browse, "Back").value.destination is json_card.value
+        last_next = target(browse, "Next")
+        assert last_next.value.destination is None
+        assert presentation_style(listener, last_next, last_next).dim
+        _tutorial_hover(surface, last_next)
+        assert documentation.sentence == (
+            "TUTORIAL NEXT • Left: this section has no next card • Right: no menu"
+        )
+        before = listener.history.rows
+        _tutorial_click(surface, last_next)
+        assert listener.history.rows == before
+        _tutorial_click(surface, last_next, button=3)
+        assert not screen.action_menu.is_open
+        assert open_target(browse, "Up: HTTP").value is section.value
+        assert open_target(section, "Up: Contents").value is contents.value

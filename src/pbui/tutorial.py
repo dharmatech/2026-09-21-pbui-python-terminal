@@ -53,11 +53,15 @@ class TutorialTarget:
 class TutorialStack:
     tour: tuple[TutorialCard, ...]
     sympy_leaves: tuple[TutorialCard, ...]
+    http_leaves: tuple[TutorialCard, ...]
     sections: tuple[TutorialCard, ...]
     contents: TutorialCard
 
     def get(self, identifier: str) -> TutorialCard:
-        for card in (*self.tour, *self.sympy_leaves, *self.sections, self.contents):
+        for card in (
+            *self.tour, *self.sympy_leaves, *self.http_leaves,
+            *self.sections, self.contents,
+        ):
             if card.identifier == identifier:
                 return card
         raise KeyError(identifier)
@@ -185,6 +189,62 @@ def make_tutorial_stack() -> TutorialStack:
         )
         for index, (identifier, title, body, source) in enumerate(sympy_definitions)
     )
+    http_definitions = (
+        (
+            "http-request", "1. Make a request",
+            (
+                "Try loads the USGS :get command; Enter runs it.",
+                "The GET row is a retained request, not a response.",
+                "Neither opening this card nor Try fetches anything.",
+            ),
+        ),
+        (
+            "http-perform", "2. Perform the GET",
+            (
+                "Open the GET row's menu and choose perform to fetch.",
+                "The request stays; a response or Error appears below it.",
+                "On a response, body shows its decoded text.",
+                "Use json on that same response to open parsed data.",
+            ),
+        ),
+        (
+            "http-json", "3. Open JSON",
+            (
+                "Open the response row's menu and choose json.",
+                "The new JsonObject summary is the parsed value.",
+                "At an empty prompt, click it to list root members.",
+                'Click ["metadata"] to list title and count.',
+            ),
+        ),
+        (
+            "http-browse", "4. Browse and reuse",
+            (
+                'From the root members, click ["features"] to list array members.',
+                'If [0] appears, click it, then ["properties"].',
+                "Read place and mag; the events and counts can change.",
+                "To reuse a JSON row, type len(, click it, type ), then Enter.",
+            ),
+        ),
+    )
+    get_source = (
+        ":get https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson"
+    )
+    http_leaves = tuple(
+        TutorialCard(
+            identifier, title, body,
+            (TutorialExample(CommandInput(get_source[1:]), get_source),)
+            if index == 0 else (),
+            previous=TutorialLink(
+                "Back", http_definitions[index - 1][0] if index else None,
+            ),
+            next=TutorialLink(
+                "Next", http_definitions[index + 1][0]
+                if index + 1 < len(http_definitions) else None,
+            ),
+            contents=TutorialLink("Up", "http"),
+        )
+        for index, (identifier, title, body) in enumerate(http_definitions)
+    )
     sections = (
         TutorialCard(
             "listener", "Listener", ("Choose a card to append it to history.",),
@@ -200,12 +260,22 @@ def make_tutorial_stack() -> TutorialStack:
             ),
             contents=TutorialLink("Up", "contents"), entries=sympy_leaves,
         ),
+        TutorialCard(
+            "http", "HTTP",
+            (
+                "Requests, responses, and JSON stay as separate objects in history.",
+                "Try starts one public USGS feed; perform is the network step.",
+                "The feed is live, so counts and events can change.",
+                "Up returns here from any of these cards.",
+            ),
+            contents=TutorialLink("Up", "contents"), entries=http_leaves,
+        ),
     )
     contents = TutorialCard(
         "contents", "Contents", ("Choose a card to append it to history.",),
         entries=sections,
     )
-    return TutorialStack(tour, sympy_leaves, sections, contents)
+    return TutorialStack(tour, sympy_leaves, http_leaves, sections, contents)
 
 
 def _target(link: TutorialLink, stack: TutorialStack) -> TutorialTarget:
