@@ -709,6 +709,9 @@ class HistorySurface(ScrollView):
 
     def on_click(self, event: events.Click) -> None:
         event.prevent_default().stop()
+        if isinstance(self.screen, ListenerScreen) and self.screen.completion_is_open:
+            self.screen.close_completion()
+            return
         if isinstance(self.screen, ListenerScreen) and self.screen.action_menu.is_open:
             self.screen.route_menu_click(event)
             return
@@ -741,6 +744,8 @@ class HistorySurface(ScrollView):
     def select_presentation(self, presentation: Presentation | None) -> None:
         """Route one history hit and synchronize its editor or appended rows."""
 
+        if isinstance(self.screen, ListenerScreen):
+            self.screen.close_completion()
         label = ""
         kind = _domain_kind(self.listener, presentation)
         if presentation is not None and kind in {"File", "Directory"}:
@@ -817,6 +822,20 @@ class HistorySurface(ScrollView):
 
         if not self.is_mounted or not isinstance(self.screen, ListenerScreen):
             return strip
+        completion = self.screen.completion_row(y)
+        if completion is not None and width > 0:
+            name, highlighted = completion
+            style = self.visual_style.rich_style + Style(reverse=highlighted)
+            row = Text(name, no_wrap=True, overflow="crop")
+            options = self.app.console.options.update(
+                width=width, height=1, no_wrap=True, overflow="crop"
+            )
+            rendered = self.app.console.render_lines(
+                row, options, style=style, pad=False, new_lines=False,
+            )
+            return Strip(rendered[0] if rendered else []).adjust_cell_length(
+                width, style
+            )
         menu = self.screen.action_menu
         geometry = menu.geometry
         if geometry is None:
@@ -1043,6 +1062,7 @@ class CommandInput(Widget):
             )
         self.refresh()
         if self.is_mounted and isinstance(self.screen, ListenerScreen):
+            self.screen.recompute_completion()
             self.screen.synchronize()
 
     def set_cursor_position(self, position: int) -> None:
@@ -1066,6 +1086,7 @@ class CommandInput(Widget):
 
     def _synchronize(self, *, reveal_newest: bool = False) -> None:
         if self.is_mounted and isinstance(self.screen, ListenerScreen):
+            self.screen.recompute_completion()
             self.screen.synchronize(reveal_newest=reveal_newest)
         else:
             self.refresh()
@@ -1096,6 +1117,40 @@ class CommandInput(Widget):
 
     def on_key(self, event: events.Key) -> None:
         key = event.key
+        screen = self.screen
+        if key == "tab":
+            if screen.completion_is_open:
+                if len(screen.completion_candidates) == 1:
+                    self.listener.apply_completion(
+                        screen.completion_candidates[0],
+                        menu_open=screen.action_menu.is_open,
+                    )
+                    screen.close_completion()
+                    self._synchronize()
+                else:
+                    screen.move_completion(1, wrap=True)
+            else:
+                candidates = self.listener.complete(
+                    menu_open=screen.action_menu.is_open
+                )
+                if len(candidates) > 1:
+                    screen.open_completion(candidates)
+                self._synchronize()
+            event.prevent_default().stop()
+            return
+        if screen.completion_is_open and key in {"up", "down"}:
+            screen.move_completion(-1 if key == "up" else 1)
+            event.prevent_default().stop()
+            return
+        if screen.completion_is_open and key == "enter":
+            self.listener.apply_completion(
+                screen.completion_candidates[screen.completion_highlight],
+                menu_open=screen.action_menu.is_open,
+            )
+            screen.close_completion()
+            self._synchronize()
+            event.prevent_default().stop()
+            return
         if key in {"up", "down"}:
             traverse = (
                 self.listener.recall_previous if key == "up"
@@ -1336,6 +1391,111 @@ class ListenerScreen(Screen[None]):
         self.command_input = CommandInput(listener, id="command-input")
         self._documentation_state = self._listener_state()
         self._pointer_screen: Offset | None = None
+        self.completion_candidates: tuple[str, ...] = ()
+        self.completion_highlight = 0
+        self.completion_window = 0
+        self._completion_editor_state: tuple[object, ...] | None = None
+
+    @property
+    def completion_is_open(self) -> bool:
+        return bool(self.completion_candidates)
+
+    def _editor_state(self) -> tuple[object, ...]:
+        listener = self.listener
+        return (
+            listener.input_mode, listener.input_text, listener.command_cursor,
+            listener.python_cursor, listener.python_pieces,
+            listener.pending_request, listener.pending_substring_listing,
+            listener.pending_python_pieces,
+        )
+
+    def _completion_visible_count(self) -> int:
+        height = self.history_surface.scrollable_content_region.height
+        return min(8, max(0, height), len(self.completion_candidates))
+
+    def _keep_completion_visible(self) -> None:
+        count = self._completion_visible_count()
+        if count == 0:
+            self.completion_window = 0
+            return
+        self.completion_window = min(
+            self.completion_window, len(self.completion_candidates) - count
+        )
+        if self.completion_highlight < self.completion_window:
+            self.completion_window = self.completion_highlight
+        elif self.completion_highlight >= self.completion_window + count:
+            self.completion_window = self.completion_highlight - count + 1
+
+    def refresh_completion(self) -> None:
+        if not self.completion_is_open:
+            return
+        self._keep_completion_visible()
+        region = self.history_surface.scrollable_content_region
+        height = min(8, region.height)
+        if height:
+            self.history_surface.refresh(
+                Region(0, region.height - height, region.width, height)
+            )
+
+    def open_completion(self, candidates: tuple[str, ...]) -> None:
+        if not candidates or self.action_menu.is_open:
+            return
+        self.completion_candidates = candidates
+        self.completion_highlight = 0
+        self.completion_window = 0
+        self._completion_editor_state = self._editor_state()
+        self.refresh_completion()
+
+    def recompute_completion(self) -> None:
+        if not self.completion_is_open:
+            return
+        candidates = self.listener.completion_candidates(
+            menu_open=self.action_menu.is_open
+        )
+        if not candidates:
+            self.close_completion()
+            return
+        self.completion_candidates = candidates
+        self.completion_highlight = 0
+        self.completion_window = 0
+        self._completion_editor_state = self._editor_state()
+        self.refresh_completion()
+
+    def move_completion(self, delta: int, *, wrap: bool = False) -> None:
+        if not self.completion_is_open:
+            return
+        index = self.completion_highlight + delta
+        self.completion_highlight = (
+            index % len(self.completion_candidates) if wrap else
+            min(max(0, index), len(self.completion_candidates) - 1)
+        )
+        self.refresh_completion()
+
+    def close_completion(self) -> None:
+        if not self.completion_is_open:
+            return
+        region = self.history_surface.scrollable_content_region
+        height = min(8, region.height)
+        self.completion_candidates = ()
+        self.completion_highlight = 0
+        self.completion_window = 0
+        self._completion_editor_state = None
+        if height:
+            self.history_surface.refresh(
+                Region(0, region.height - height, region.width, height)
+            )
+
+    def completion_row(self, y: int) -> tuple[str, bool] | None:
+        count = self._completion_visible_count()
+        if count == 0:
+            return None
+        self._keep_completion_visible()
+        height = self.history_surface.scrollable_content_region.height
+        start = height - count
+        if not start <= y < height:
+            return None
+        index = self.completion_window + y - start
+        return self.completion_candidates[index], index == self.completion_highlight
 
     def _listener_state(self) -> tuple[object, ...]:
         return (
@@ -1361,6 +1521,7 @@ class ListenerScreen(Screen[None]):
     def on_resize(self, _event: events.Resize) -> None:
         self.call_after_refresh(self.reposition_menu)
         self.call_after_refresh(self.synchronize)
+        self.call_after_refresh(self.refresh_completion)
 
     def history_hover_changed(self) -> None:
         if not self.action_menu.is_open:
@@ -1441,6 +1602,7 @@ class ListenerScreen(Screen[None]):
     def open_menu(
         self, target: Presentation | None, *, anchor: tuple[int, int] | None = None
     ) -> None:
+        self.close_completion()
         if self.action_menu.is_open:
             return
         if (
@@ -1642,12 +1804,20 @@ class ListenerScreen(Screen[None]):
         )
 
     def on_click(self, event: events.Click) -> None:
-        if self.action_menu.is_open:
+        if self.completion_is_open:
+            self.close_completion()
+            event.prevent_default().stop()
+        elif self.action_menu.is_open:
             self.route_menu_click(event)
 
     def synchronize(
         self, *, reveal_newest: bool = False, clear_hover: bool = False
     ) -> None:
+        if (
+            self.completion_is_open
+            and self._completion_editor_state != self._editor_state()
+        ):
+            self.close_completion()
         state = self._listener_state()
         if state != self._documentation_state:
             self._documentation_state = state
@@ -1699,6 +1869,9 @@ class PbuiApp(App[None], inherit_bindings=False):
 
     def action_cancel_listener(self) -> None:
         screen = self.screen
+        if isinstance(screen, ListenerScreen) and screen.completion_is_open:
+            screen.close_completion()
+            return
         if isinstance(screen, ListenerScreen) and screen.action_menu.is_open:
             screen.close_menu()
             return

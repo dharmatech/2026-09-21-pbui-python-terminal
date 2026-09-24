@@ -57,6 +57,7 @@ from pbui.substrate import (
     grouped_operation,
 )
 from pbui.chips import Piece, PythonChip, PythonLine, insertion_site_reason
+from pbui.completion import CompletionResult, command_completion, python_completion
 from pbui.http import (
     MAX_BODY_BYTES, REDIRECT_STATUSES, BodyTooLarge, GetRequest, GetTransport,
     GetTransportError, HttpResponse, JsonArray, JsonObject,
@@ -962,6 +963,59 @@ class HeadlessListener:
     @property
     def command_names(self) -> tuple[str, ...]:
         return self.COMMAND_NAMES
+
+    def _completion_site(self, menu_open: bool) -> CompletionResult | None:
+        if (
+            self.pending_request is not None
+            or self._pending_substring_listing is not None
+            or menu_open
+        ):
+            return None
+        if self.input_mode == "command":
+            return command_completion(
+                self.input_text, self.command_cursor, self.command_names,
+                has_chip=self._command_chip_loaded or self.chip is not None,
+            )
+        if self.input_mode == "python":
+            return python_completion(
+                self.pending_python_pieces, self._python_line, self.python_namespace,
+            )
+        return None
+
+    def completion_candidates(self, *, menu_open: bool = False) -> tuple[str, ...]:
+        site = self._completion_site(menu_open)
+        return () if site is None else site.candidates
+
+    def _replace_completion(self, site: CompletionResult, name: str) -> None:
+        if self.input_mode == "command":
+            self._state.input_text = (
+                self.input_text[:site.start] + name + self.input_text[site.end:]
+            )
+            self._command_cursor = site.start + len(name)
+            self._python_line.set_text(self._state.input_text)
+            self._python_line.cursor = self._command_cursor
+        else:
+            self._python_line.replace_text_span(site.start, site.end, name)
+            self._sync_python_text()
+
+    def complete(self, *, menu_open: bool = False) -> tuple[str, ...]:
+        site = self._completion_site(menu_open)
+        if site is None or not site.candidates:
+            return ()
+        if len(site.candidates) == 1:
+            self._replace_completion(site, site.candidates[0])
+        else:
+            prefix = os.path.commonprefix(site.candidates)
+            if len(prefix) > len(site.fragment):
+                self._replace_completion(site, prefix)
+        return site.candidates
+
+    def apply_completion(self, name: str, *, menu_open: bool = False) -> bool:
+        site = self._completion_site(menu_open)
+        if site is None or name not in site.candidates:
+            return False
+        self._replace_completion(site, name)
+        return True
 
     def set_input_text(self, text: str) -> None:
         if not isinstance(text, str):

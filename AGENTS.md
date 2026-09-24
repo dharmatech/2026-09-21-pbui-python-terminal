@@ -61,9 +61,11 @@ program with a Lisp machine or a CLIM port.
 
 For implementation of the program as it stands, the accepted
 specifications under `docs/design/implementation/` are the law:
-listener, listings, repl, chips, sympy, transcript, popup, http, and
-tutorial. Their charters are the original assignments, not the
-current law. Bottom is accepted and implemented through bottom 002.
+listener, listings, repl, chips, sympy, transcript, popup, http,
+tutorial, recall, and completion. Their charters are the original
+assignments, not the current law. Bottom is accepted and implemented
+through bottom 002. Recall is accepted and implemented through recall
+001. Completion is accepted and implemented through completion 002.
 `docs/design/implementation/bottom/checkpoints/003-remove-no-target-wording.md`
 is ready to implement and is not part of the history work.
 `docs/design/implementation/history/charter.md` is the open

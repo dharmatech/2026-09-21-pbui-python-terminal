@@ -84,6 +84,20 @@ class PythonLine:
         self.cursor += 1
         self._pieces = _pieces(atoms)
 
+    def replace_text_span(self, start: int, end: int, text: str) -> None:
+        """Replace character atoms without reconstructing neighboring chips."""
+
+        atoms = _atoms(self._pieces)
+        if not isinstance(text, str):
+            raise TypeError("replacement text must be a string")
+        if not 0 <= start <= end <= len(atoms) or any(
+            not isinstance(atom, str) for atom in atoms[start:end]
+        ):
+            raise ValueError("replacement span must contain only text")
+        atoms[start:end] = list(text)
+        self._pieces = _pieces(atoms)
+        self.cursor = start + len(text)
+
     def split_at_cursor(self) -> tuple[tuple[Piece, ...], tuple[Piece, ...]]:
         atoms = _atoms(self._pieces)
         return _pieces(atoms[:self.cursor]), _pieces(atoms[self.cursor:])

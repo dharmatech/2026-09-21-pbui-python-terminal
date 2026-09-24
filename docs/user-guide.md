@@ -47,9 +47,10 @@ you what clicking will do.
 | `widen` | Clear both filters while keeping the current sort order. |
 
 Commands are intentionally simpler than shell commands. There are no pipes,
-redirects, globs, completion, or command history. Quotes have no special
-meaning. The rest of a path command is its argument, so a path containing
-spaces can be entered directly:
+redirects, or globs. Quotes have no special meaning. Tab completes a name
+in the input row, and Up and Down recall earlier submissions. The rest of
+a path command is its argument, so a path containing spaces can be entered
+directly:
 
 ```text
 show a file with spaces.txt
@@ -134,11 +135,12 @@ command.
 | Key | Action |
 |---|---|
 | Enter | Submit the current input. |
+| Tab | Complete a name at the caret; when a completion list is open, move to the next candidate. |
 | Up | Recall the next older submission from this session. |
 | Down | Move toward newer submissions, then restore unsent input. |
 | `Ctrl-O` | Open the action menu for the presentation under the pointer. |
 | `Ctrl-G` | Clear input and cancel a pending selection, substring prompt, or menu. |
-| Escape | Cancel like `Ctrl-G`; when a menu is open, close the menu first. |
+| Escape | Close a completion list first; otherwise cancel like Ctrl-G, closing an open action menu first. |
 | `Ctrl-D` | Exit when ordinary input is empty and nothing is waiting. |
 | `Ctrl-C` | Exit from any state. |
 | Left, Right, Home, End | Move within the input line. |

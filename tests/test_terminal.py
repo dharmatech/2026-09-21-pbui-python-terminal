@@ -1462,6 +1462,149 @@ async def test_recall_keys_keep_editor_caret_and_history_viewport(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_completion_list_overlay_keys_click_and_menu(tmp_path):
+    (tmp_path / "sample").write_text("data")
+    listener = make_listener(tmp_path)
+    _append_plain_rows(listener, 20, prefix="before")
+    listener.submit(":ls")
+    listing = first_listing(listener)
+    file = next(
+        item for item in listing.member_presentations
+        if item.presentation_type is listener.types.file
+    )
+    _append_plain_rows(listener, 20, prefix="after")
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(100, 14)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        editor = screen.command_input
+        documentation = screen.documentation_line
+        height = surface.scrollable_content_region.height
+        assert height >= 8
+        interval = file.intervals[0]
+        surface.scroll_to_row(interval.physical_row - height + 1)
+        await pilot.pause()
+        assert surface.presentation_at_content_offset(
+            interval.start_column, height - 1
+        ) is file
+        scroll = int(surface.scroll_y)
+        anchor = _top_logical_row(surface)
+        rows = listener.history.rows
+        revision = listener.history.revision
+        presentations = listener.history.presentations
+        sentence = documentation.sentence
+
+        await pilot.press(":", "tab")
+        assert screen.completion_candidates == tuple(sorted(listener.command_names))
+        assert len(screen.completion_candidates) > 8
+        assert screen.completion_highlight == 0
+        assert screen.completion_window == 0
+        assert [screen.completion_row(y)[0] for y in range(height - 8, height)] == list(
+            screen.completion_candidates[:8]
+        )
+        assert all(screen.completion_row(y) is None for y in range(height - 8))
+        assert surface.render_line(height - 8).text.startswith(
+            screen.completion_candidates[0]
+        )
+        assert any(segment.style.reverse for segment in surface.render_line(height - 8))
+        assert documentation.sentence == sentence
+        assert int(surface.scroll_y) == scroll
+        assert _top_logical_row(surface) is anchor
+        assert listener.history.rows == rows
+        assert listener.history.presentations == presentations
+
+        await pilot.press("up", "down")
+        assert screen.completion_highlight == 1
+        assert listener.recall_position is None
+        await pilot.press(*("down",) * 8)
+        assert screen.completion_highlight == 9
+        assert screen.completion_window == 2
+        assert screen.completion_row(height - 1) == (
+            screen.completion_candidates[9], True
+        )
+        await pilot.press("tab", "tab", "tab")
+        assert screen.completion_highlight == 0
+        assert screen.completion_window == 0
+        await pilot.press(*("down",) * 9)
+        assert screen.completion_highlight == 9
+        chosen = screen.completion_candidates[9]
+        await pilot.press("enter")
+        assert not screen.completion_is_open
+        assert listener.input_text == ":" + chosen
+        assert editor.cursor_position == len(listener.input_text)
+        assert listener.history.revision == revision
+        assert listener.history.rows == rows
+        assert int(surface.scroll_y) == scroll
+        assert surface.render_line(height - 1).text != chosen
+
+        await pilot.press("ctrl+g", ":", "tab", "escape")
+        assert not screen.completion_is_open
+        assert listener.input_text == ":"
+        await pilot.press("up")
+        assert listener.input_text == ":ls"
+        assert listener.recall_position == 0
+        await pilot.press("ctrl+g", ":", "tab", "s", "o")
+        assert screen.completion_is_open
+        assert screen.completion_candidates == ("sort",)
+        assert listener.input_text == ":so"
+        await pilot.press("tab")
+        assert not screen.completion_is_open
+        assert listener.input_text == ":sort"
+        await pilot.press("ctrl+g")
+
+        screen.open_menu(file)
+        assert screen.action_menu.is_open
+        await pilot.press("tab")
+        assert screen.action_menu.is_open
+        assert not screen.completion_is_open
+        screen.close_menu()
+
+        await pilot.press(":", "tab")
+        assert screen.completion_is_open
+        await pilot.resize_terminal(40, 6)
+        short_height = surface.scrollable_content_region.height
+        assert short_height == 3
+        assert sum(
+            screen.completion_row(y) is not None for y in range(short_height)
+        ) == short_height
+        assert documentation.region.y == surface.region.bottom
+        assert editor.region.y == documentation.region.bottom
+
+        await pilot.resize_terminal(100, 14)
+        height = surface.scrollable_content_region.height
+        assert screen.completion_row(height - 1) is not None
+        surface.scroll_to_row(file.intervals[0].physical_row - height + 1)
+        await pilot.pause()
+        before_wheel = int(surface.scroll_y)
+        surface.post_message(_mouse_event(
+            events.MouseScrollDown, surface, 0, 0
+        ))
+        await pilot.pause()
+        assert int(surface.scroll_y) == before_wheel + 3
+        assert screen.completion_row(height - 1) is not None
+        surface.scroll_to_row(file.intervals[0].physical_row - height + 1)
+        await pilot.pause()
+        scroll = int(surface.scroll_y)
+        interval = file.intervals[0]
+        assert surface.presentation_at_content_offset(
+            interval.start_column, height - 1
+        ) is file
+        assert listener.history.presentations == presentations
+        surface.on_click(_mouse_event(
+            events.Click, surface, interval.start_column, height - 1, button=1
+        ))
+        assert not screen.completion_is_open
+        assert listener.input_text == ":"
+        assert listener.history.revision == revision
+        assert int(surface.scroll_y) == scroll
+        surface.on_click(_mouse_event(
+            events.Click, surface, interval.start_column, height - 1, button=1
+        ))
+        assert listener.history.revision > revision
+
+
+@pytest.mark.asyncio
 async def test_editor_inserts_moves_and_deletes_by_code_point(tmp_path):
     listener = make_listener(tmp_path)
     app = PbuiApp(listener)
@@ -1482,7 +1625,7 @@ async def test_editor_inserts_moves_and_deletes_by_code_point(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_paste_is_one_row_and_tab_remains_focus_navigation(tmp_path):
+async def test_paste_is_one_row_and_tab_keeps_input_focus(tmp_path):
     listener = make_listener(tmp_path)
     listener.set_input_text("ab")
     app = PbuiApp(listener)
@@ -1499,6 +1642,8 @@ async def test_paste_is_one_row_and_tab_remains_focus_navigation(tmp_path):
         before = listener.input_text
         await pilot.press("tab")
         assert listener.input_text == before
+        assert command.has_focus
+        assert not app.screen.completion_is_open
         command.post_message(events.Key("unknown", "\ud800"))
         await pilot.pause()
         assert listener.input_text == before

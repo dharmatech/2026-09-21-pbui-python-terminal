@@ -33,16 +33,16 @@ it, its environment, and its dependencies with uv only.
 | [`tutorial`](docs/design/implementation/tutorial/README.md) | A short tour of cards inside the listener | Implemented through tutorial 001 |
 | [`bottom`](docs/design/implementation/bottom/README.md) | Mode on the input row, and a clearer documentation line | Implemented through bottom 002; bottom 003 ready to implement |
 | [`history`](docs/design/implementation/history/README.md) | Blank lines between operations, and results indented under `›` | Specification drafted, waiting for review |
-| [`recall`](docs/design/implementation/recall/README.md) | Up and Down bring earlier submissions back into the input row | Charter written; specification not started |
+| [`recall`](docs/design/implementation/recall/README.md) | Up and Down bring earlier submissions back into the input row | Implemented through recall 001 |
+| [`completion`](docs/design/implementation/completion/README.md) | Tab completes commands, Python names, attributes, and imports | Implemented through completion 002 |
 
 A new discussion should read [`AGENTS.md`](AGENTS.md). The listener,
-listings, REPL, chips, SymPy, transcript, popup, HTTP, and tutorial
-specifications are the law for the program as it stands. Bottom is
-implemented through bottom 002. The
+listings, REPL, chips, SymPy, transcript, popup, HTTP, tutorial,
+recall, and completion specifications are the law for the program as
+it stands. Bottom is implemented through bottom 002. Recall is
+implemented through recall 001. Completion is implemented through
+completion 002. The
 [`history`](docs/design/implementation/history/README.md) specification
 is drafted and waiting for review. The
-[`recall`](docs/design/implementation/recall/README.md) charter is the
-assignment for Up and Down. It is not law until its specification is
-accepted. The
 [`transcript demo`](docs/design/implementation/transcript/demo.md) offers
 examples to try.
