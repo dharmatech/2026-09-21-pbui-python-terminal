@@ -7,13 +7,14 @@ coherent application model which a later terminal adapter will render.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import pwd
 import signal
 import stat as stat_module
 import sys
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from pbui.domain import (
@@ -54,8 +55,14 @@ from pbui.substrate import (
     TranslatorTable,
 )
 from pbui.chips import Piece, PythonChip, PythonLine, insertion_site_reason
-from pbui.text import HistoryRow, logical_presentation_text, truncate_display
+from pbui.http import (
+    MAX_BODY_BYTES, REDIRECT_STATUSES, BodyTooLarge, GetRequest, GetTransport,
+    GetTransportError, HttpResponse, JsonArray, JsonObject,
+    content_type_of, is_json_media_type, parse_json, production_get, validate_url,
+)
+from pbui.text import HistoryRow, LiteralFragment, logical_presentation_text, truncate_display
 from pbui.repl import PythonEvaluator, ValueClasses, ValueTranslator
+from pbui.transcript import CommandInput, MenuActionInput, PythonInput, append_input
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +360,7 @@ class HeadlessListener:
         "narrow",
         "only",
         "widen",
+        "get",
     )
     VIEW_COMMAND_NAMES = frozenset({"sort", "narrow", "only", "widen"})
 
@@ -364,6 +372,7 @@ class HeadlessListener:
         *,
         history_max_rows: int = PresentationHistory.MAX_LOGICAL_ROWS,
         username_lookup: Callable[[int], object] | None = None,
+        get_transport: GetTransport = production_get,
     ) -> None:
         normalized_cwd = filesystem.abspath(starting_cwd)
         cwd_stat = filesystem.stat(normalized_cwd)
@@ -374,6 +383,10 @@ class HeadlessListener:
 
         self._filesystem = filesystem
         self._processes = processes
+        if not callable(get_transport):
+            raise TypeError("GET transport must be callable")
+        self._get_transport = get_transport
+        self._http_json_states: dict[int, tuple[bool, object]] = {}
         self._username_lookup = (
             _production_username_lookup
             if username_lookup is None
@@ -386,12 +399,20 @@ class HeadlessListener:
         self._types = register_domain_types(self._registry)
         self._history = PresentationHistory(history_max_rows)
         self._contexts = make_domain_drawing_contexts(self._types)
+        for input_type in (
+            self._types.python_input,
+            self._types.command_input,
+            self._types.menu_action_input,
+        ):
+            self._contexts.standalone.register_drawer(input_type, lambda value, context: "")
         self._state = SubstrateState()
         self._python_line = PythonLine()
         self._suspended_python: tuple[tuple[tuple[Piece, ...], ...], PythonLine] | None = None
-        self._pending_substring_listing: DirectoryListing | ProcessListing | None = (
-            None
-        )
+        self._pending_substring_listing: DirectoryListing | ProcessListing | None = None
+        self._pending_command_tail: str | None = None
+        self._pending_substring_command: bool = False
+        self._pending_menu_narrow: MenuActionInput | None = None
+        self._command_chip_loaded = False
         self._repl = PythonEvaluator(
             self._history,
             self._contexts.standalone,
@@ -399,7 +420,19 @@ class HeadlessListener:
             self._append_text,
             self._append_error,
             self.COMMAND_NAMES,
+            self._record_python,
         )
+        self._repl.classes.register(GetRequest, lambda request: f"GET {request.url}")
+        self._repl.classes.register(
+            HttpResponse, lambda response: f"HTTP {response.status} {response.final_url}"
+        )
+        self._repl.classes.register(
+            JsonObject, lambda value: f"▸ JsonObject ({len(value)} keys)"
+        )
+        self._repl.classes.register(
+            JsonArray, lambda value: f"▸ JsonArray ({len(value)} elements)"
+        )
+        self._repl.on_value_presented = self._on_value_presented
         self._translators = TranslatorTable()
         for presentation_type in (
             self._types.file,
@@ -407,6 +440,36 @@ class HeadlessListener:
             self._types.process,
         ):
             self._translators.register(presentation_type, self._translate_show)
+
+    def _record_python(self, lines: tuple[tuple[Piece, ...], ...]) -> Presentation:
+        return append_input(
+            self._history, self._contexts.standalone, PythonInput(lines),
+            self._types.python_input,
+        )
+
+    def _record_command(self, tail: str, chip: Chip | None = None) -> Presentation:
+        return append_input(
+            self._history, self._contexts.standalone, CommandInput(tail, chip),
+            self._types.command_input,
+        )
+
+    def _action_record(
+        self, label: str, operation: Callable[..., object], argument: str | None,
+        presentation: Presentation, kind: str, operation_name: str | None = None,
+    ) -> MenuActionInput:
+        target_label = logical_presentation_text(self._history, presentation)
+        if target_label is None:
+            raise ValueError("menu action requires a retained target")
+        return MenuActionInput(
+            label, operation, argument, presentation.value, target_label,
+            kind, operation_name,
+        )
+
+    def _record_action(self, action: MenuActionInput) -> Presentation:
+        return append_input(
+            self._history, self._contexts.standalone, action,
+            self._types.menu_action_input,
+        )
 
     @classmethod
     def production(cls) -> HeadlessListener:
@@ -553,6 +616,101 @@ class HeadlessListener:
         self._sync_python_text()
         return True
 
+    @staticmethod
+    def _piece_length(pieces: tuple[Piece, ...]) -> int:
+        return sum(len(piece) if isinstance(piece, str) else 1 for piece in pieces)
+
+    def _insert_saved_lines(self, lines: tuple[tuple[Piece, ...], ...]) -> None:
+        prefix, suffix = self._python_line.split_at_cursor()
+        if len(lines) == 1:
+            inserted = prefix + lines[0]
+            self._python_line = PythonLine(
+                inserted + suffix, self._piece_length(inserted)
+            )
+        else:
+            self._repl.pending_lines += (prefix + lines[0],) + lines[1:-1]
+            self._python_line = PythonLine(
+                lines[-1] + suffix, self._piece_length(lines[-1])
+            )
+        self._sync_python_text()
+
+    def yank_input(self, presentation: Presentation) -> bool:
+        """Load saved input at an empty editor, or insert it during composition."""
+
+        if (
+            self.pending_request is not None
+            or self._pending_substring_listing is not None
+            or self._history.get_presentation(presentation.id) is not presentation
+        ):
+            return False
+        value = presentation.value
+        if presentation.type is self._types.python_input and isinstance(value, PythonInput):
+            if self.input_mode == "empty":
+                self._repl.pending_lines = value.lines[:-1]
+                self._python_line = PythonLine(value.lines[-1])
+                self._sync_python_text()
+            elif self.input_mode == "python":
+                self._insert_saved_lines(value.lines)
+            else:
+                return False
+            return True
+        if presentation.type is self._types.command_input and isinstance(value, CommandInput):
+            if self.input_mode == "empty":
+                self.set_input_text(":" + value.tail)
+                self._state.chip = value.chip
+                self._command_chip_loaded = value.chip is not None
+            elif self.input_mode == "python":
+                pieces: tuple[Piece, ...] = (":" + value.tail,)
+                if value.chip is not None:
+                    pieces += (PythonChip(value.chip.value, value.chip.label),)
+                self._insert_saved_lines((pieces,))
+            else:
+                return False
+            return True
+        return False
+
+    def run_again(self, presentation: Presentation) -> bool:
+        """Repeat a retained action using its captured operation and target."""
+
+        if (
+            self.pending_request is not None
+            or self._pending_substring_listing is not None
+            or self._history.get_presentation(presentation.id) is not presentation
+            or presentation.type is not self._types.menu_action_input
+        ):
+            return False
+        action = presentation.value
+        if not isinstance(action, MenuActionInput):
+            return False
+        self._record_action(replace(action))
+        if action.kind == "translator":
+            self._repl.invoke_resolved_translator(action.operation, action.target)
+        elif action.kind == "http":
+            action.operation(action.target)
+        elif action.kind == "member":
+            action.operation(action.target)
+        elif action.kind == "listing":
+            if not self._listing_is_retained(action.target):
+                self._append_error("listing is no longer in history.")
+            else:
+                action.operation(
+                    action.target, action.operation_name, action.argument,
+                    record_menu=False,
+                )
+        else:
+            raise AssertionError("unknown saved action kind")
+        return True
+
+    def _insert_action_target(self, presentation: Presentation) -> bool:
+        if self.python_insertion_reason(presentation) != "valid":
+            return False
+        action = presentation.value
+        self._python_line.insert_chip(
+            PythonChip(action.target, truncate_display(action.target_label, 32))
+        )
+        self._sync_python_text()
+        return True
+
     @property
     def pending_request(self) -> AcceptRequest | None:
         return self._state.pending_request
@@ -598,12 +756,41 @@ class HeadlessListener:
     ) -> tuple[ValueTranslator, ...]:
         if presentation.presentation_type is not self._types.value:
             return ()
-        return self._repl.classes.translators_for(presentation.value)
+        value = presentation.value
+        if type(value) is GetRequest:
+            return (ValueTranslator("perform", self._perform_http),)
+        if type(value) is HttpResponse:
+            actions: list[ValueTranslator] = []
+            state = self._http_json_states.get(presentation.id)
+            if state is not None and state[0]:
+                parsed = state[1]
+                actions.append(ValueTranslator("json", lambda _value: parsed))
+            actions.append(ValueTranslator("body", self._show_http_body))
+            return tuple(actions)
+        return self._repl.classes.translators_for(value)
 
     def invoke_python_translator(
         self, presentation: Presentation, index: int
     ) -> Presentation | None:
-        return self._repl.invoke_translator(presentation, index)
+        if (
+            presentation.type is not self._types.value
+            or self._history.get_presentation(presentation.id) is not presentation
+        ):
+            raise ValueError("translator requires a retained Value presentation")
+        translator = self.python_translators_for(presentation)[index]
+        http_action = translator.label in {"perform", "body"} and type(
+            presentation.value
+        ) in {GetRequest, HttpResponse}
+        action = self._action_record(
+            translator.label, translator.function, None, presentation,
+            "http" if http_action else "translator",
+        )
+        self._record_action(action)
+        if http_action:
+            return translator.function(presentation.value)
+        return self._repl.invoke_resolved_translator(
+            translator.function, presentation.value
+        )
 
     def cancel_python_continuation(self) -> None:
         self._repl.cancel()
@@ -654,15 +841,15 @@ class HeadlessListener:
             return
         decision = submitted.lstrip()
         if decision.startswith(":"):
-            command_line = decision[1:]
-            if command_line.startswith(" "):
-                command_line = command_line[1:]
+            raw_tail = decision[1:]
+            command_line = raw_tail[1:] if raw_tail.startswith(" ") else raw_tail
             if not command_line.strip():
                 self._state.input_text = ""
                 self._python_line = PythonLine()
                 return
         elif self._state.pending_request is not None:
             command_line = submitted
+            raw_tail = self._pending_command_tail or submitted
         else:
             self._state.input_text = ""
             self._python_line = PythonLine()
@@ -672,19 +859,51 @@ class HeadlessListener:
         if parsed is None:
             return
         command_name, raw_argument = parsed
+
+        if self._command_chip_loaded and self._state.chip is not None:
+            chip = self._state.chip
+            self._record_command(raw_tail, chip)
+            try:
+                if command_name not in self.COMMAND_NAMES:
+                    self._append_error(f"unknown command: {escape_display(command_name)}.")
+                elif command_name not in {"show", "cd", "rm", "kill"} or raw_argument is not None:
+                    self._append_error(f"{escape_display(command_name)} cannot use this chip.")
+                elif chip.type not in self._acceptable_types(command_name):
+                    self._append_error(f"{escape_display(command_name)} cannot use this chip type.")
+                else:
+                    self._execute(command_name, chip.value)
+            finally:
+                self._clear_attempt()
+            return
+
         if command_name not in self.COMMAND_NAMES:
             try:
+                self._record_command(raw_tail)
                 self._append_error(
                     f"unknown command: {escape_display(command_name)}."
                 )
             finally:
                 self._clear_attempt()
             return
+        if command_name == "get":
+            self._record_command(raw_tail)
+            try:
+                start = len(command_line) - len(command_line.lstrip())
+                end = start + len(command_name)
+                url = command_line[end + 1:] if end < len(command_line) else ""
+                if not url:
+                    self._append_error("get requires a URL.")
+                else:
+                    self._repl.display_value(GetRequest(url), update_last=False)
+            finally:
+                self._clear_attempt()
+            return
         if command_name in self.VIEW_COMMAND_NAMES:
-            self._submit_view_command(command_name, raw_argument)
+            self._submit_view_command(command_name, raw_argument, raw_tail)
             return
         if command_name == "ps" and raw_argument is not None:
             try:
+                self._record_command(raw_tail)
                 self._append_error(
                     f"{escape_display(command_name)} does not take an argument."
                 )
@@ -693,16 +912,20 @@ class HeadlessListener:
             return
         if raw_argument is None:
             if command_name == "ls":
+                self._record_command(raw_tail)
                 item = TypedDomainValue(
                     self._types.directory, DirectoryRef(self._cwd)
                 )
                 self._run_typed(command_name, item)
             elif command_name == "ps":
+                self._record_command(raw_tail)
                 self._run_without_argument(command_name)
             else:
                 self._begin_accept(command_name)
+                self._pending_command_tail = raw_tail
             return
 
+        self._record_command(raw_tail)
         parser = {
             "ls": parse_directory,
             "show": parse_show,
@@ -769,6 +992,8 @@ class HeadlessListener:
 
     def _finish_chip(self, command_name: str, chip: Chip) -> None:
         try:
+            if self._pending_command_tail is not None:
+                self._record_command(self._pending_command_tail, chip)
             self._execute(command_name, chip.value)
         finally:
             self._clear_attempt()
@@ -779,6 +1004,10 @@ class HeadlessListener:
         self._state.pending_request = None
         self._state.chip = None
         self._pending_substring_listing = None
+        self._pending_command_tail = None
+        self._pending_substring_command = False
+        self._pending_menu_narrow = None
+        self._command_chip_loaded = False
 
     def cancel(self) -> None:
         saved = self._suspended_python
@@ -788,11 +1017,18 @@ class HeadlessListener:
         self._python_line = PythonLine()
         self._state.cancel()
         self._pending_substring_listing = None
+        self._pending_command_tail = None
+        self._pending_substring_command = False
+        self._pending_menu_narrow = None
+        self._command_chip_loaded = False
         if saved is not None:
             self.restore_python_input(saved)
 
     def backspace_chip(self) -> bool:
-        return self._state.backspace()
+        changed = self._state.backspace()
+        if changed:
+            self._command_chip_loaded = False
+        return changed
 
     def select_for_input(
         self, presentation: Presentation | None, label: str = ""
@@ -803,9 +1039,48 @@ class HeadlessListener:
             return False
         if self._state.pending_request is not None:
             return self._state.select_presentation(presentation, label)
+        if presentation.type in (self._types.python_input, self._types.command_input):
+            return self.yank_input(presentation)
+        if presentation.type is self._types.menu_action_input:
+            return (
+                self._insert_action_target(presentation)
+                if self.input_mode == "python"
+                else self.run_again(presentation) if self.input_mode == "empty" else False
+            )
         if self.input_mode == "python":
             return self.insert_python_chip(presentation)
         return self.select(presentation, label)
+
+    def dig_json(self, presentation: Presentation) -> bool:
+        """Append one bounded level from a retained JSON collection."""
+
+        if (
+            presentation.type is not self._types.value
+            or self._history.get_presentation(presentation.id) is not presentation
+            or self._state.pending_request is not None
+            or self._pending_substring_listing is not None
+        ):
+            return False
+        value = presentation.value
+        if type(value) is JsonObject:
+            for index, (key, member) in enumerate(value.items()):
+                if index == 100:
+                    break
+                escaped_key = json.dumps(key, ensure_ascii=False)[1:-1]
+                label = f'["{truncate_display(escaped_key, 44)}"]'
+                self._repl.append_labeled_value(member, label)
+        elif type(value) is JsonArray:
+            for index, member in enumerate(value):
+                if index == 100:
+                    break
+                self._repl.append_labeled_value(member, f"[{index}]")
+        else:
+            return False
+        if len(value) > 100:
+            self._history.append(
+                HistoryRow((LiteralFragment(f"… ({len(value) - 100} more members)"),))
+            )
+        return True
 
     def select(self, presentation: Presentation | None, label: str = "") -> bool:
         # The current terminal adapter continues to call this legacy route.
@@ -816,6 +1091,8 @@ class HeadlessListener:
         if self._state.pending_request is not None:
             return self._state.select_presentation(presentation, label)
         if presentation.presentation_type is self._types.value:
+            if type(presentation.value) in (JsonObject, JsonArray):
+                return self.dig_json(presentation)
             return self._repl.show_detail(presentation)
         translator = self._translators.lookup(presentation.presentation_type)
         if translator is None:
@@ -855,6 +1132,18 @@ class HeadlessListener:
             or command_name not in rule[1]
         ):
             return False
+        operation = {
+            "show": self._command_show,
+            "cd": self._command_cd,
+            "rm": self._command_rm,
+            "kill": self._command_kill,
+            "ls": self._command_ls,
+        }[command_name]
+        self._record_action(
+            self._action_record(
+                command_name, operation, None, presentation, "member"
+            )
+        )
         self._run_typed(
             command_name,
             TypedDomainValue(presentation.presentation_type, presentation.value),
@@ -875,9 +1164,14 @@ class HeadlessListener:
             return False
         if listing.header_presentation not in self._history.presentations:
             return False
+        action = self._action_record(
+            "narrow", self.apply_listing_view, None,
+            listing.header_presentation, "listing", "narrow",
+        )
         if self.input_mode == "python":
             self._suspended_python = self.capture_python_input()
         self._begin_substring_accept(listing)
+        self._pending_menu_narrow = action
         if self._suspended_python is not None:
             self._repl.pending_lines = ()
         return True
@@ -900,6 +1194,48 @@ class HeadlessListener:
             self._command_rm(value)
         else:
             raise AssertionError(f"unregistered command {command_name!r}")
+
+    def _http_error(self, message: str) -> None:
+        self._append_error(truncate_display(escape_display(message), 4096))
+
+    def _on_value_presented(self, presentation: Presentation) -> None:
+        self._http_json_states = {
+            key: state for key, state in self._http_json_states.items()
+            if self._history.get_presentation(key) is not None
+        }
+        response = presentation.value
+        if type(response) is not HttpResponse or not is_json_media_type(response.content_type):
+            return
+        try:
+            parsed = parse_json(response.body)
+        except (UnicodeError, ValueError, RecursionError) as error:
+            self._http_json_states[presentation.id] = (False, error)
+            self._http_error(f"invalid JSON response: {error}")
+        else:
+            self._http_json_states[presentation.id] = (True, parsed)
+
+    def _perform_http(self, request: GetRequest) -> Presentation | None:
+        try:
+            validate_url(request)
+            result = self._get_transport(request)
+            if len(result.body) > MAX_BODY_BYTES:
+                raise BodyTooLarge()
+            if int(result.status) in REDIRECT_STATUSES:
+                raise GetTransportError(f"HTTP redirect failed: {result.status}")
+            response = HttpResponse(
+                int(result.status), result.final_url,
+                content_type_of(result.headers), result.body,
+            )
+        except Exception as error:
+            self._http_error(f"GET failed: {error}")
+            return None
+        return self._repl.display_value(response)
+
+    def _show_http_body(self, response: HttpResponse) -> None:
+        drawing = truncate_display(
+            escape_display(response.body.decode("utf-8", "replace")), 4096
+        )
+        self._append_text(drawing)
 
     def _append_text(self, text: str) -> None:
         self._history.append(
@@ -951,11 +1287,12 @@ class HeadlessListener:
         return any(row.listing_owner is listing for row in self._history.rows)
 
     def _submit_view_command(
-        self, command_name: str, raw_argument: str | None
+        self, command_name: str, raw_argument: str | None, raw_tail: str
     ) -> None:
         listing = self._newest_retained_listing()
         if listing is None:
             try:
+                self._record_command(raw_tail)
                 self._append_error("no listing in history.")
             finally:
                 self._clear_attempt()
@@ -963,8 +1300,10 @@ class HeadlessListener:
 
         if command_name == "narrow" and raw_argument is None:
             self._begin_substring_accept(listing)
+            self._pending_substring_command = True
             return
 
+        self._record_command(raw_tail)
         grammar_error: str | None = None
         if command_name == "sort" and (
             raw_argument is None
@@ -987,7 +1326,9 @@ class HeadlessListener:
             return
 
         try:
-            self.apply_listing_view(listing, command_name, raw_argument)
+            self.apply_listing_view(
+                listing, command_name, raw_argument, record_menu=False
+            )
         finally:
             self._clear_attempt()
 
@@ -1005,7 +1346,18 @@ class HeadlessListener:
         if not substring:
             return False
         try:
-            return self.apply_listing_view(listing, "narrow", substring)
+            if self._pending_substring_command:
+                self._record_command("narrow " + substring)
+            elif self._pending_menu_narrow is not None:
+                self._record_action(
+                    replace(self._pending_menu_narrow, argument=substring)
+                )
+                if not self._listing_is_retained(listing):
+                    self._append_error("listing is no longer in history.")
+                    return False
+            return self.apply_listing_view(
+                listing, "narrow", substring, record_menu=False
+            )
         finally:
             saved = self._suspended_python
             self._suspended_python = None
@@ -1018,6 +1370,8 @@ class HeadlessListener:
         listing: DirectoryListing | ProcessListing,
         operation: str,
         argument: str | None = None,
+        *,
+        record_menu: bool = True,
     ) -> bool:
         """Apply one view operation to an exact retained listing and redisplay it."""
 
@@ -1029,6 +1383,22 @@ class HeadlessListener:
             raise ValueError(f"unknown listing view operation {operation!r}")
         if not self._listing_is_retained(listing):
             return False
+        if (
+            record_menu
+            and listing.header_presentation is not None
+            and self._history.get_presentation(listing.header_presentation.id)
+            is listing.header_presentation
+        ):
+            label = operation if operation == "narrow" or argument is None else f"{operation} {argument}"
+            self._record_action(
+                self._action_record(
+                    label, self.apply_listing_view, argument,
+                    listing.header_presentation, "listing", operation,
+                )
+            )
+            if not self._listing_is_retained(listing):
+                self._append_error("listing is no longer in history.")
+                return False
 
         if operation == "sort":
             if type(argument) is not str or not argument:

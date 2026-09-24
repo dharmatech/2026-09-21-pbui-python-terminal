@@ -27,8 +27,14 @@ it, its environment, and its dependencies with uv only.
 | [`repl`](docs/design/implementation/repl/README.md) | Python evaluation and a generic value presentation | Implemented through repl 001 |
 | [`chips`](docs/design/implementation/chips/README.md) | Click a history value into the Python expression being typed | Implemented through chips 001 |
 | [`sympy`](docs/design/implementation/sympy/README.md) | Pretty SymPy expressions and simplify, expand, factor | Implemented through sympy 000 |
+| [`transcript`](docs/design/implementation/transcript/README.md) | Record input in the history and bring it back | Implemented through transcript 001 |
+| [`popup`](docs/design/implementation/popup/README.md) | Menu beside the pointer, and a button documentation line | Implemented through popup 000 |
+| [`http`](docs/design/implementation/http/README.md) | GET requests, responses, and clickable JSON | Charter written, waiting for review |
+| [`tutorial`](docs/design/implementation/tutorial/README.md) | A short tour of cards inside the listener | Charter written, waiting for review |
 
 A new discussion should read [`AGENTS.md`](AGENTS.md). The listener,
-listings, REPL, and chips specifications are the law for the program
-as it stands, along with the SymPy specification. The
-[`SymPy demo`](docs/design/implementation/sympy/demo.md) offers examples to try.
+listings, REPL, chips, SymPy, transcript, and popup specifications are
+the law for the program as it stands. The HTTP and tutorial charters
+are separate next explorations. The
+[`transcript demo`](docs/design/implementation/transcript/demo.md) offers
+examples to try.

@@ -23,11 +23,35 @@ def listener_at(tmp_path):
 
 
 def drawings(listener):
-    return tuple(row.text for row in layout(listener.history, 10000).rows)
+    # These predecessor assertions concern result rows.
+    return tuple(
+        row.text for row in layout(listener.history, 10000).rows
+        if not listener.history.rows[row.logical_row].presentations
+        or listener.history.rows[row.logical_row].presentations[0].type not in (
+            listener.types.python_input,
+            listener.types.command_input,
+            listener.types.menu_action_input,
+        )
+    )
 
 
 def values(listener):
     return tuple(p for p in listener.history.presentations if p.type is listener.types.value)
+
+
+
+def result_rows(listener):
+    """Rows covered by the predecessor result/listing assertions."""
+    input_types = {
+        listener.types.python_input,
+        listener.types.command_input,
+        listener.types.menu_action_input,
+    }
+    return tuple(
+        row for row in listener.history.rows
+        if not row.presentations or row.presentations[0].type not in input_types
+    )
+
 
 
 def test_namespace_symbolic_row_and_one_line_detail(tmp_path):
@@ -116,9 +140,9 @@ def test_generic_objects_and_test_only_none_failure(tmp_path):
     listener.submit("custom")
     target = values(listener)[-1]
     previous = listener.python_namespace["_"]
-    before = len(listener.history.rows)
+    before = len(result_rows(listener))
     assert listener.invoke_python_translator(target, 1) is None
-    assert len(listener.history.rows) == before + 1
+    assert len(result_rows(listener)) == before + 1
     assert drawings(listener)[-1].endswith("RuntimeError: broken")
     assert listener.python_namespace["_"] is previous
     assert values(listener)[-1] is target
@@ -173,9 +197,9 @@ def test_control_escaping_and_printer_detail_failures(tmp_path, monkeypatch):
         raise RuntimeError("pretty failed")
 
     monkeypatch.setattr(repl.sympy, "pretty", broken)
-    before = len(listener.history.rows)
+    before = len(result_rows(listener))
     assert listener.select(target)
-    assert len(listener.history.rows) == before + 1
+    assert len(result_rows(listener)) == before + 1
     assert drawings(listener)[-1].endswith("RuntimeError: pretty failed")
     assert listener.python_namespace["_"] is expression
 

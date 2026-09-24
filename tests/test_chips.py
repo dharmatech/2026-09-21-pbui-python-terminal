@@ -27,7 +27,16 @@ def listener_at(tmp_path, *, max_rows=500):
 
 
 def drawings(listener):
-    return tuple(row.text for row in layout(listener.history, 10000).rows)
+    # These predecessor assertions concern result rows.
+    return tuple(
+        row.text for row in layout(listener.history, 10000).rows
+        if not listener.history.rows[row.logical_row].presentations
+        or listener.history.rows[row.logical_row].presentations[0].type not in (
+            listener.types.python_input,
+            listener.types.command_input,
+            listener.types.menu_action_input,
+        )
+    )
 
 
 def value_row(listener):

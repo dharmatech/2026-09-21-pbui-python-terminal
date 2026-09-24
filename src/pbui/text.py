@@ -69,6 +69,27 @@ def truncate_display(text: str, width: int) -> str:
     return "".join(retained) + ELLIPSIS
 
 
+def wrap_display(text: str, width: int) -> tuple[str, ...]:
+    """Split printable text into display-cell rows without splitting marks."""
+
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
+    if width <= 0:
+        raise ValueError("width must be positive")
+    rows: list[str] = []
+    current: list[str] = []
+    used = 0
+    for cluster, cluster_width in _display_clusters(text):
+        if current and used + cluster_width > width:
+            rows.append("".join(current))
+            current = []
+            used = 0
+        current.append(cluster)
+        used += cluster_width
+    rows.append("".join(current))
+    return tuple(rows)
+
+
 @dataclass(frozen=True, slots=True)
 class LiteralFragment:
     text: str

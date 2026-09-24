@@ -84,6 +84,10 @@ class PythonLine:
         self.cursor += 1
         self._pieces = _pieces(atoms)
 
+    def split_at_cursor(self) -> tuple[tuple[Piece, ...], tuple[Piece, ...]]:
+        atoms = _atoms(self._pieces)
+        return _pieces(atoms[:self.cursor]), _pieces(atoms[self.cursor:])
+
     def left(self) -> None:
         self.cursor = max(0, self.cursor - 1)
 

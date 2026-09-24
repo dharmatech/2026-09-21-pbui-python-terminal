@@ -166,9 +166,11 @@ class PythonEvaluator:
         append_text: Callable[[str], None],
         append_error: Callable[[str], None],
         command_names: tuple[str, ...],
+        append_input: Callable[[tuple[tuple[Piece, ...], ...]], object],
     ) -> None:
         self.namespace: dict[str, Any] = {"__name__": "__pbui__"}
         self.pending_lines: tuple[tuple[Piece, ...], ...] = ()
+        self.on_value_presented: Callable[[Presentation], None] | None = None
         self.classes = ValueClasses()
         self.classes.register(
             sympy.Expr,
@@ -185,6 +187,7 @@ class PythonEvaluator:
         self._append_text = append_text
         self._append_error = append_error
         self._command_names = command_names
+        self._append_input = append_input
 
     @property
     def pending_source(self) -> str:
@@ -207,12 +210,14 @@ class PythonEvaluator:
             compiled = code.compile_command(source, symbol="single")
         except (SyntaxError, OverflowError, ValueError) as error:
             self.pending_lines = ()
+            self._append_input(lines)
             self._append_error(_compile_error(error))
             return
         if compiled is None:
             self.pending_lines = lines
             return
         self.pending_lines = ()
+        self._append_input(lines)
         stdout = _LineWriter("", self._append_text)
         stderr = _LineWriter("stderr: ", self._append_text)
         old_hook, old_stdout, old_stderr = sys.displayhook, sys.stdout, sys.stderr
@@ -238,31 +243,52 @@ class PythonEvaluator:
         self.display_value(value)
 
     def display_value(
-        self, value: Any, *, include_none: bool = False
+        self, value: Any, *, include_none: bool = False, update_last: bool = True
     ) -> Presentation | None:
         if value is None and not include_none:
             return None
-        self.namespace["_"] = value
+        if update_last:
+            self.namespace["_"] = value
         row = self._context.present_row(value, self._value_type)
         self._history.append(row)
         presentation = row.presentations[0]
         try:
-            registration = self.classes.lookup(value)
-            if registration is None:
-                kind = truncate_display(escape_display(type(value).__name__), 64)
-                representation = truncate_display(
-                    escape_display(_bounded_repr(value)), 96
-                )
-                drawing = f"{kind} {representation}"
-            else:
-                drawing = truncate_display(escape_display(registration.printer(value)), 120)
-            updated = HistoryRow(
-                (PresentedFragment(presentation.id, (LiteralFragment(drawing),)),),
-                (presentation,),
-            )
-            self._history.replace_row(row, updated)
+            self._replace_value_row(row, presentation, self.value_row_text(value))
         except BaseException as error:
             self._append_error(_execution_error(error, "", self._command_names))
+        if self.on_value_presented is not None:
+            self.on_value_presented(presentation)
+        return presentation
+
+    def value_row_text(self, value: Any) -> str:
+        """Return the normal safe, one-line drawing for a Value."""
+
+        registration = self.classes.lookup(value)
+        if registration is None:
+            kind = truncate_display(escape_display(type(value).__name__), 64)
+            representation = truncate_display(escape_display(_bounded_repr(value)), 96)
+            return f"{kind} {representation}"
+        return truncate_display(escape_display(registration.printer(value)), 120)
+
+    def _replace_value_row(
+        self, row: HistoryRow, presentation: Presentation, drawing: str
+    ) -> None:
+        self._history.replace_row(
+            row,
+            HistoryRow(
+                (PresentedFragment(presentation.id, (LiteralFragment(drawing),)),),
+                (presentation,),
+            ),
+        )
+
+    def append_labeled_value(self, value: Any, label: str) -> Presentation:
+        """Append a member whose label and value form one Value presentation."""
+
+        drawing = truncate_display(f"{label}  {self.value_row_text(value)}", 120)
+        row = self._context.present_row(value, self._value_type)
+        self._history.append(row)
+        presentation = row.presentations[0]
+        self._replace_value_row(row, presentation, drawing)
         return presentation
 
     def invoke_translator(
@@ -274,8 +300,15 @@ class PythonEvaluator:
         ):
             raise ValueError("translator requires a retained Value presentation")
         translator = self.classes.translators_for(presentation.value)[index]
+        return self.invoke_resolved_translator(translator.function, presentation.value)
+
+    def invoke_resolved_translator(
+        self, function: Callable[[Any], Any], value: Any
+    ) -> Presentation | None:
+        """Run a captured translator on its original object without a source row."""
+
         try:
-            result = translator.function(presentation.value)
+            result = function(value)
         except BaseException as error:
             self._append_error(_execution_error(error, "", self._command_names))
             return None

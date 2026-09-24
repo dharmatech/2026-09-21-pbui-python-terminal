@@ -65,7 +65,11 @@ specifications are `docs/design/implementation/listener/spec.md`,
 `docs/design/implementation/repl/spec.md`,
 `docs/design/implementation/chips/spec.md`, and
 `docs/design/implementation/sympy/spec.md`. Their charters are the
-original assignments, not the current law. SymPy is implemented through
-`docs/design/implementation/sympy/checkpoints/000-expressions.md`.
-Pandas comes after that. Implementers follow one approved checkpoint. The
-checkpoint repeats the `uv` commands for the slice it covers.
+original assignments, not the current law. The popup menu is implemented. Two explorations are open, and they
+are separate. `docs/design/implementation/http/charter.md` is a GET
+request, its response, and clickable JSON. `docs/design/implementation/tutorial/charter.md`
+is a short local tour of cards inside the listener. Neither is a web
+server, and neither waits on the other. Until each specification is
+accepted, that work is discussion, not implementation. Implementers
+follow one approved checkpoint. The checkpoint repeats the `uv`
+commands for the slice it covers.

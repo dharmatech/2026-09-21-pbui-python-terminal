@@ -24,11 +24,35 @@ def listener_at(tmp_path):
 
 
 def drawings(listener):
-    return tuple(row.text for row in layout(listener.history, 10000).rows)
+    # These predecessor assertions concern result rows.
+    return tuple(
+        row.text for row in layout(listener.history, 10000).rows
+        if not listener.history.rows[row.logical_row].presentations
+        or listener.history.rows[row.logical_row].presentations[0].type not in (
+            listener.types.python_input,
+            listener.types.command_input,
+            listener.types.menu_action_input,
+        )
+    )
 
 
 def values(listener):
     return tuple(p for p in listener.history.presentations if p.type is listener.types.value)
+
+
+
+def result_rows(listener):
+    """Rows covered by the predecessor result/listing assertions."""
+    input_types = {
+        listener.types.python_input,
+        listener.types.command_input,
+        listener.types.menu_action_input,
+    }
+    return tuple(
+        row for row in listener.history.rows
+        if not row.presentations or row.presentations[0].type not in input_types
+    )
+
 
 
 def test_python_bindings_results_and_colon_command_dispatch(tmp_path):
@@ -44,9 +68,9 @@ def test_python_bindings_results_and_colon_command_dispatch(tmp_path):
     listener.submit("ls")
     assert drawings(listener)[-1].startswith("Error: Traceback")
     assert drawings(listener)[-1].endswith("Use :ls to run the listener command.")
-    assert not any(row.listing_owner is not None for row in listener.history.rows)
+    assert not any(row.listing_owner is not None for row in result_rows(listener))
     listener.submit(":ls")
-    assert any(row.listing_owner is not None for row in listener.history.rows)
+    assert any(row.listing_owner is not None for row in result_rows(listener))
     listener.submit(": sort name")
     listener.submit(":ls()")
     assert drawings(listener)[-1] == "Error: unknown command: ls()."
@@ -59,7 +83,7 @@ def test_colon_arguments_and_modal_accept(tmp_path):
     child.mkdir()
     listener = listener_at(tmp_path)
     listener.submit(f": ls {child}")
-    assert any(row.listing_owner is not None for row in listener.history.rows)
+    assert any(row.listing_owner is not None for row in result_rows(listener))
     listener.submit(":rm")
     assert listener.pending_request is not None
     listener.cancel()
@@ -77,15 +101,15 @@ def test_continuation_keeps_blank_and_colon_lines_as_python_and_cancels(tmp_path
     listener.submit(":ls")
     assert listener.pending_python_source == ""
     assert drawings(listener)[-1].startswith("Error: SyntaxError:")
-    assert not any(row.listing_owner is not None for row in listener.history.rows)
+    assert not any(row.listing_owner is not None for row in result_rows(listener))
     for cancel in (listener.cancel, listener.cancel_python_continuation, listener.cancel_python_continuation):
         listener.submit("if True:")
         listener.set_input_text("    pass")
-        before = tuple(listener.history.rows)
+        before = tuple(result_rows(listener))
         cancel()
         assert listener.pending_python_source == ""
         assert listener.input_text == ""
-        assert listener.history.rows == before
+        assert result_rows(listener) == before
     listener.submit("3")
     assert drawings(listener)[-1] == "int 3"
 
@@ -115,7 +139,7 @@ def test_compile_and_execution_errors_are_single_escaped_rows(tmp_path):
     listener = listener_at(tmp_path)
     before = sys.displayhook, sys.stdout, sys.stderr
     listener.submit("if =")
-    assert len(listener.history.rows) == 1
+    assert len(result_rows(listener)) == 1
     assert drawings(listener)[-1].startswith("Error: SyntaxError:")
     assert "\\n" not in drawings(listener)[-1]
     listener.submit('print("first"); raise ValueError("bad\\nline")')
@@ -196,9 +220,9 @@ def test_class_mro_printer_translators_and_exact_acceptance(tmp_path):
     assert translated is not None and translated.value is None
     assert listener.python_namespace["_"] is None
     assert drawings(listener)[-1] == "object printer"
-    previous_rows = len(listener.history.rows)
+    previous_rows = len(result_rows(listener))
     listener.invoke_python_translator(presentation, 1)
-    assert len(listener.history.rows) == previous_rows + 1
+    assert len(result_rows(listener)) == previous_rows + 1
     assert "ZeroDivisionError" in drawings(listener)[-1]
     assert listener.python_namespace["_"] is None
 

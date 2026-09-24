@@ -38,6 +38,9 @@ class DomainTypes:
     directory_listing: PresentationType
     process_listing: PresentationType
     value: PresentationType
+    python_input: PresentationType
+    command_input: PresentationType
+    menu_action_input: PresentationType
 
 
 def register_domain_types(registry: PresentationTypeRegistry) -> DomainTypes:
@@ -54,6 +57,9 @@ def register_domain_types(registry: PresentationTypeRegistry) -> DomainTypes:
         directory_listing=registry.register("DirectoryListing"),
         process_listing=registry.register("ProcessListing"),
         value=registry.register("Value"),
+        python_input=registry.register("PythonInput"),
+        command_input=registry.register("CommandInput"),
+        menu_action_input=registry.register("MenuActionInput"),
     )
 
 
