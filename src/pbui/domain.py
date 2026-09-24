@@ -41,6 +41,9 @@ class DomainTypes:
     python_input: PresentationType
     command_input: PresentationType
     menu_action_input: PresentationType
+    tutorial_card: PresentationType
+    tutorial_target: PresentationType
+    tutorial_try: PresentationType
 
 
 def register_domain_types(registry: PresentationTypeRegistry) -> DomainTypes:
@@ -60,6 +63,9 @@ def register_domain_types(registry: PresentationTypeRegistry) -> DomainTypes:
         python_input=registry.register("PythonInput"),
         command_input=registry.register("CommandInput"),
         menu_action_input=registry.register("MenuActionInput"),
+        tutorial_card=registry.register("TutorialCard"),
+        tutorial_target=registry.register("TutorialTarget"),
+        tutorial_try=registry.register("TutorialTry"),
     )
 
 
@@ -779,6 +785,12 @@ def register_domain_drawers(
     context.register_drawer(types.directory_listing, draw_directory_listing)
     context.register_drawer(types.process_listing, draw_process_listing)
     context.register_drawer(types.value, draw_value)
+    # Tutorial rows supply their own nested bracket labels and share one outer
+    # presentation across rows. The type drawers intentionally add no text.
+    for tutorial_type in (
+        types.tutorial_card, types.tutorial_target, types.tutorial_try
+    ):
+        context.register_drawer(tutorial_type, lambda _value, _context: "")
     return context
 
 

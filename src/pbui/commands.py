@@ -63,6 +63,10 @@ from pbui.http import (
 from pbui.text import HistoryRow, LiteralFragment, logical_presentation_text, truncate_display
 from pbui.repl import PythonEvaluator, ValueClasses, ValueTranslator
 from pbui.transcript import CommandInput, MenuActionInput, PythonInput, append_input
+from pbui.tutorial import (
+    TutorialCard, TutorialExample, TutorialStack, TutorialTarget,
+    append_tutorial_card, make_tutorial_stack,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,6 +365,7 @@ class HeadlessListener:
         "only",
         "widen",
         "get",
+        "tutorial",
     )
     VIEW_COMMAND_NAMES = frozenset({"sort", "narrow", "only", "widen"})
 
@@ -399,6 +404,7 @@ class HeadlessListener:
         self._types = register_domain_types(self._registry)
         self._history = PresentationHistory(history_max_rows)
         self._contexts = make_domain_drawing_contexts(self._types)
+        self._tutorial_stack = make_tutorial_stack()
         for input_type in (
             self._types.python_input,
             self._types.command_input,
@@ -511,6 +517,16 @@ class HeadlessListener:
     @property
     def drawing_contexts(self) -> DomainDrawingContexts:
         return self._contexts
+
+    @property
+    def tutorial_stack(self) -> TutorialStack:
+        return self._tutorial_stack
+
+    def append_tutorial_card(self, card: TutorialCard) -> Presentation:
+        return append_tutorial_card(
+            self._history, self._contexts.standalone, self._types,
+            self._tutorial_stack, card,
+        )
 
     @property
     def state(self) -> SubstrateState:
@@ -634,6 +650,18 @@ class HeadlessListener:
             )
         self._sync_python_text()
 
+    def _load_saved_input(self, value: PythonInput | CommandInput) -> None:
+        """Load saved pieces into the ordinary empty editor."""
+
+        if isinstance(value, PythonInput):
+            self._repl.pending_lines = value.lines[:-1]
+            self._python_line = PythonLine(value.lines[-1])
+            self._sync_python_text()
+        else:
+            self.set_input_text(":" + value.tail)
+            self._state.chip = value.chip
+            self._command_chip_loaded = value.chip is not None
+
     def yank_input(self, presentation: Presentation) -> bool:
         """Load saved input at an empty editor, or insert it during composition."""
 
@@ -646,9 +674,7 @@ class HeadlessListener:
         value = presentation.value
         if presentation.type is self._types.python_input and isinstance(value, PythonInput):
             if self.input_mode == "empty":
-                self._repl.pending_lines = value.lines[:-1]
-                self._python_line = PythonLine(value.lines[-1])
-                self._sync_python_text()
+                self._load_saved_input(value)
             elif self.input_mode == "python":
                 self._insert_saved_lines(value.lines)
             else:
@@ -656,9 +682,7 @@ class HeadlessListener:
             return True
         if presentation.type is self._types.command_input and isinstance(value, CommandInput):
             if self.input_mode == "empty":
-                self.set_input_text(":" + value.tail)
-                self._state.chip = value.chip
-                self._command_chip_loaded = value.chip is not None
+                self._load_saved_input(value)
             elif self.input_mode == "python":
                 pieces: tuple[Piece, ...] = (":" + value.tail,)
                 if value.chip is not None:
@@ -668,6 +692,33 @@ class HeadlessListener:
                 return False
             return True
         return False
+
+    def open_tutorial_target(self, presentation: Presentation) -> bool:
+        if (
+            presentation.type is not self._types.tutorial_target
+            or self._history.get_presentation(presentation.id) is not presentation
+            or not isinstance(presentation.value, TutorialTarget)
+            or presentation.value.destination is None
+        ):
+            return False
+        self.append_tutorial_card(presentation.value.destination)
+        return True
+
+    def load_tutorial_example(self, presentation: Presentation) -> bool:
+        if (
+            presentation.type is not self._types.tutorial_try
+            or self._history.get_presentation(presentation.id) is not presentation
+            or not isinstance(presentation.value, TutorialExample)
+            or self.input_mode != "empty"
+            or self._python_line.pieces
+            or self._state.chip is not None
+            or self._state.pending_request is not None
+            or self._pending_substring_listing is not None
+            or self._repl.pending_lines
+        ):
+            return False
+        self._load_saved_input(presentation.value.saved_input)
+        return True
 
     def run_again(self, presentation: Presentation) -> bool:
         """Repeat a retained action using its captured operation and target."""
@@ -901,7 +952,7 @@ class HeadlessListener:
         if command_name in self.VIEW_COMMAND_NAMES:
             self._submit_view_command(command_name, raw_argument, raw_tail)
             return
-        if command_name == "ps" and raw_argument is not None:
+        if command_name in {"ps", "tutorial"} and raw_argument is not None:
             try:
                 self._record_command(raw_tail)
                 self._append_error(
@@ -920,6 +971,12 @@ class HeadlessListener:
             elif command_name == "ps":
                 self._record_command(raw_tail)
                 self._run_without_argument(command_name)
+            elif command_name == "tutorial":
+                self._record_command(raw_tail)
+                try:
+                    self.append_tutorial_card(self._tutorial_stack.tour[0])
+                finally:
+                    self._clear_attempt()
             else:
                 self._begin_accept(command_name)
                 self._pending_command_tail = raw_tail
@@ -1035,7 +1092,13 @@ class HeadlessListener:
     ) -> bool:
         """Route a headless history selection using modal and input precedence."""
 
-        if self._pending_substring_listing is not None or presentation is None:
+        if presentation is None:
+            return False
+        if presentation.type is self._types.tutorial_target:
+            return self.open_tutorial_target(presentation)
+        if presentation.type is self._types.tutorial_try:
+            return self.load_tutorial_example(presentation)
+        if self._pending_substring_listing is not None:
             return False
         if self._state.pending_request is not None:
             return self._state.select_presentation(presentation, label)
@@ -1084,6 +1147,10 @@ class HeadlessListener:
 
     def select(self, presentation: Presentation | None, label: str = "") -> bool:
         # The current terminal adapter continues to call this legacy route.
+        if presentation is not None and presentation.type is self._types.tutorial_target:
+            return self.open_tutorial_target(presentation)
+        if presentation is not None and presentation.type is self._types.tutorial_try:
+            return self.load_tutorial_example(presentation)
         if self._pending_substring_listing is not None or self._repl.pending_lines:
             return False
         if presentation is None:

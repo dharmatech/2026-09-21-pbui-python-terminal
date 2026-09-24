@@ -10,8 +10,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-import sympy
-
 from rich.style import Style
 from rich.text import Text
 from textual import events
@@ -23,23 +21,14 @@ from textual.scroll_view import ScrollView
 from textual.strip import Strip
 from textual.widget import Widget
 
+from pbui.bottom import (
+    MENU_BORDER_DOCUMENTATION, _captured_process_member, _domain_kind,
+    _name, _pid, fit_documentation, format_documentation,
+    format_menu_item_documentation, format_mode, format_popup_failure,
+)
 from pbui.commands import HeadlessListener
-from pbui.http import JsonArray, JsonObject
 from pbui.menu_geometry import CellRect, MenuGeometry, opening_anchor, place_menu
-from pbui.domain import (
-    DirectoryListing,
-    DirectoryRef,
-    FileRef,
-    ProcessListing,
-    ProcessListingMember,
-    ProcessRef,
-    escape_display,
-)
-from pbui.transcript import (
-    CommandInput as SavedCommandInput,
-    MenuActionInput,
-    PythonInput,
-)
+from pbui.domain import DirectoryListing, ProcessListing, escape_display
 from pbui.substrate import (
     DisplayInterval,
     Presentation,
@@ -49,6 +38,7 @@ from pbui.text import (
     HistoryRow,
     Layout,
     _character_width,
+    _display_clusters,
     display_width,
     layout,
     truncate_display,
@@ -69,15 +59,6 @@ _PROCESS_STATE_COLORS = {
     "unknown": "#a8a8a8",
 }
 
-_SUBSTRING_DOCUMENTATION = (
-    "Type a substring and press Enter to narrow this listing; "
-    "Ctrl-G or Esc cancels."
-)
-
-_MENU_DOCUMENTATION = "Click an item; Ctrl-G or Esc closes the menu."
-_CONTINUATION_DOCUMENTATION = (
-    "Python continuation: enter another line; Ctrl-G or Esc discards it."
-)
 _DIRECTORY_ACTIONS = (
     "sort name", "sort size", "sort mtime", "only files", "only directories",
     "narrow", "widen",
@@ -139,63 +120,6 @@ def filter_one_row(text: str) -> str:
     return "".join(character for character in text if character.isprintable())
 
 
-def _domain_kind(
-    listener: HeadlessListener, presentation: Presentation | None
-) -> str | None:
-    """Identify only entries from this listener's exact type registry."""
-
-    if presentation is None:
-        return None
-    presentation_type = presentation.presentation_type
-    types = listener.types
-    if presentation_type is types.file and type(presentation.value) is FileRef:
-        return "File"
-    if (
-        presentation_type is types.directory
-        and type(presentation.value) is DirectoryRef
-    ):
-        return "Directory"
-    if presentation_type is types.process and type(presentation.value) is ProcessRef:
-        return "Process"
-    if (
-        presentation_type is types.directory_listing
-        and type(presentation.value) is DirectoryListing
-    ):
-        return "DirectoryListing"
-    if (
-        presentation_type is types.process_listing
-        and type(presentation.value) is ProcessListing
-    ):
-        return "ProcessListing"
-    if presentation_type is types.python_input and type(presentation.value) is PythonInput:
-        return "PythonInput"
-    if presentation_type is types.command_input and type(presentation.value) is SavedCommandInput:
-        return "CommandInput"
-    if presentation_type is types.menu_action_input and type(presentation.value) is MenuActionInput:
-        return "MenuActionInput"
-    if presentation_type is types.value:
-        return "Value"
-    if presentation_type is types.text:
-        return "Text"
-    if presentation_type is types.error:
-        return "Error"
-    return None
-
-
-def _name(presentation: Presentation) -> str:
-    value = presentation.value
-    if type(value) not in {FileRef, DirectoryRef}:
-        raise TypeError("path documentation requires a path presentation")
-    return escape_display(os.path.basename(value.path))
-
-
-def _pid(presentation: Presentation) -> str:
-    value = presentation.value
-    if type(value) is not ProcessRef:
-        raise TypeError("process documentation requires a process presentation")
-    return str(value.pid)
-
-
 def _menu_labels(kind: str | None) -> tuple[str, ...]:
     return {
         "File": ("show", "rm"),
@@ -209,183 +133,13 @@ def _menu_labels(kind: str | None) -> tuple[str, ...]:
     }.get(kind, ())
 
 
-def _menu_item_documentation(action: MenuAction, listener: HeadlessListener) -> str:
-    target = action.target
-    kind = _domain_kind(listener, target)
-    label = action.label
-    if kind in {"PythonInput", "CommandInput"}:
-        if listener.input_mode == "command":
-            return "Left: no action while editing a command. Right: no menu."
-        return "Left: yank this input into the editor. Right: no menu."
-    if kind == "MenuActionInput":
-        return f"Left: run “{target.value.label}” again on the same object. Right: no menu."
-    if kind == "File":
-        return f"Left: run “{label}” for file “{_name(target)}”. Right: no menu."
-    if kind == "Directory":
-        return f"Left: run “{label}” for directory “{_name(target)}”. Right: no menu."
-    if kind == "Process":
-        return f"Left: run “{label}” for process {_pid(target)}. Right: no menu."
-    if kind == "DirectoryListing":
-        return f"Left: apply “{label}” to this directory listing. Right: no menu."
-    if kind == "ProcessListing":
-        return f"Left: apply “{label}” to this process listing. Right: no menu."
-    if kind == "Value":
-        return f"Left: apply “{label}” to this Python value. Right: no menu."
-    raise AssertionError("menu action requires an actionable target")
-
-
-def _captured_process_member(
-    listener: HeadlessListener, presentation: Presentation
-) -> ProcessListingMember | None:
-    """Find a process row's immutable captured record by presentation identity."""
-
-    seen_listings: set[int] = set()
-    for row in listener.history.rows:
-        listing = row.listing_owner
-        if type(listing) is not ProcessListing or id(listing) in seen_listings:
-            continue
-        seen_listings.add(id(listing))
-        for member, member_presentation in zip(
-            listing.members, listing.member_presentations, strict=True
-        ):
-            if member_presentation is presentation:
-                return member
-    return None
-
-
-def format_documentation(
-    listener: HeadlessListener,
-    presentation: Presentation | None,
-    logical_column: int | None = None,
-) -> str:
-    """Return the exact sentence for the listener and pointer state."""
-
-    if listener.pending_substring_listing is not None:
-        return _SUBSTRING_DOCUMENTATION
-    kind = _domain_kind(listener, presentation)
-    request = listener.pending_request
-    if request is not None:
-        command = request.command_name
-        required = {
-            "rm": "File",
-            "cd": "Directory",
-            "kill": "Process",
-            "show": "File, Directory, or Process",
-        }[command]
-        if presentation is None:
-            return (
-                f"Accept {required} for {command}: point to a highlighted "
-                f"{required} and click; Ctrl-G or Esc cancels."
-            )
-        accepted = {
-            "rm": {"File"},
-            "cd": {"Directory"},
-            "kill": {"Process"},
-            "show": {"File", "Directory", "Process"},
-        }[command]
-        if kind in accepted:
-            assert presentation is not None
-            target = (
-                f"file “{_name(presentation)}”" if kind == "File" else
-                f"directory “{_name(presentation)}”" if kind == "Directory" else
-                f"process {_pid(presentation)}"
-            )
-            return f"Left: use {target} and run {command}. Right: no menu."
-        type_name = presentation.presentation_type.name
-        return (
-            f"Left: cannot use {type_name} for {command}; "
-            f"{required} required. Right: no menu."
-        )
-
-    if presentation is None:
-        if listener.pending_python_source:
-            return _CONTINUATION_DOCUMENTATION
-        return "No presentation under pointer."
-
-    has_menu = bool(
-        listener.python_translators_for(presentation)
-        if kind == "Value" else _menu_labels(kind)
-    )
-    right = "menu" if has_menu else "no menu"
-    mode = listener.input_mode
-    if kind in {"PythonInput", "CommandInput"}:
-        if mode == "empty":
-            action = (
-                "load this Python form into the editor; Enter runs it"
-                if kind == "PythonInput" else
-                "load this command into the editor; Enter runs it"
-            )
-            return f"Left: {action}. Right: menu."
-        if mode == "python":
-            return "Left: insert this input at the cursor. Right: menu."
-        return "Left: no action while editing a command. Right: menu."
-    if kind == "MenuActionInput" and mode == "empty":
-        return (
-            f"Left: run “{presentation.value.label}” again on the same object. "
-            "Right: menu."
-        )
-    if mode == "command" and kind == "MenuActionInput":
-        return "Left: no action while editing a command. Right: menu."
-    if mode == "python":
-        reason = listener.python_insertion_reason(presentation)
-        if reason == "valid":
-            return f"Left: insert this value into the expression. Right: {right}."
-        if reason == "literal":
-            return (
-                "Left: insertion unavailable in a string or comment. "
-                f"Right: {right}."
-            )
-        if reason == "expression":
-            return (
-                "Left: move the cursor to a Python expression position to "
-                f"insert this value. Right: {right}."
-            )
-
-    if kind == "File":
-        return f"Left: show file “{_name(presentation)}”. Right: menu."
-    if kind == "Directory":
-        return f"Left: show directory “{_name(presentation)}”. Right: menu."
-    if kind == "Process":
-        member = _captured_process_member(listener, presentation)
-        if (
-            member is not None
-            and logical_column is not None
-            and 42 <= logical_column < 90
-            and display_width(member.command) > 48
-        ):
-            return (
-                f"Left: show the full command for process {_pid(presentation)} "
-                "(command is truncated). Right: menu."
-            )
-        return f"Left: show process {_pid(presentation)}. Right: menu."
-    if kind == "DirectoryListing":
-        return "Left: no action on this directory listing. Right: menu."
-    if kind == "ProcessListing":
-        return "Left: no action on this process listing. Right: menu."
-    if kind == "Value":
-        if type(presentation.value) is JsonObject:
-            return "Left: list this JSON object's members. Right: no menu."
-        if type(presentation.value) is JsonArray:
-            return "Left: list this JSON array's members. Right: no menu."
-        subject = (
-            "this SymPy expression"
-            if isinstance(presentation.value, sympy.Expr)
-            else "this Python value"
-        )
-        return f"Left: show {subject}. Right: {right}."
-    if kind == "Text":
-        return "Left: no action for Text. Right: no menu."
-    if kind == "Error":
-        return "Left: no action for Error. Right: no menu."
-    return "No presentation under pointer."
-
-
 def format_prompt(listener: HeadlessListener) -> str:
     """Return the literal prompt derived from the listener's own cwd."""
 
-    if listener.pending_substring_listing is None and listener.pending_python_source:
-        return "...> "
-    return f"pbui:{escape_display(listener.cwd)}> "
+    cwd = escape_display(listener.cwd)
+    if listener.pending_substring_listing is None and listener.pending_python_pieces:
+        return f"pbui:{cwd} ...> "
+    return f"pbui:{cwd}> "
 
 
 def presentation_style(
@@ -395,6 +149,19 @@ def presentation_style(
 ) -> Style:
     """Map one retained presentation to its complete interaction style."""
 
+    kind = _domain_kind(listener, presentation)
+    if kind == "TutorialTarget":
+        enabled = presentation.value.destination is not None
+        return Style(
+            color="#00afff" if enabled else "#808080",
+            bold=enabled, underline=enabled, dim=not enabled,
+            reverse=enabled and presentation is hovered_presentation,
+        )
+    if kind == "TutorialTry":
+        return Style(
+            color="#00afff", bold=True, underline=True,
+            reverse=presentation is hovered_presentation,
+        )
     request = listener.pending_request
     if request is not None:
         acceptable = presentation.presentation_type in request.acceptable_types
@@ -414,7 +181,6 @@ def presentation_style(
             reverse=False,
         )
 
-    kind = _domain_kind(listener, presentation)
     color = "default"
     bold = False
     if kind == "Error":
@@ -954,6 +720,11 @@ class HistorySurface(ScrollView):
                 return
         if event.button != 1:
             return
+        self.select_presentation(presentation)
+
+    def select_presentation(self, presentation: Presentation | None) -> None:
+        """Route one history hit and synchronize its editor or appended rows."""
+
         label = ""
         kind = _domain_kind(self.listener, presentation)
         if presentation is not None and kind in {"File", "Directory"}:
@@ -964,7 +735,7 @@ class HistorySurface(ScrollView):
         revision = self.listener.history.revision
         selected = self.listener.select_for_input(presentation, label)
         if isinstance(self.screen, ListenerScreen):
-            if selected and kind in {"PythonInput", "CommandInput"}:
+            if selected and kind in {"PythonInput", "CommandInput", "TutorialTry"}:
                 self.screen.command_input.adopt_listener_cursor()
             self.screen.synchronize(
                 reveal_newest=(
@@ -1181,8 +952,13 @@ class DocumentationLine(Widget):
     def sentence(self) -> str:
         if self.override_sentence is not None:
             return self.override_sentence
+        menu_open = (
+            self.is_mounted and isinstance(self.screen, ListenerScreen)
+            and self.screen.action_menu.is_open
+        )
         return format_documentation(
-            self.listener, self.presentation, self.logical_column
+            self.listener, self.presentation, self.logical_column,
+            menu_open=menu_open,
         )
 
     def set_presentation(
@@ -1201,21 +977,22 @@ class DocumentationLine(Widget):
     def render(self) -> Text:
         width = self.content_size.width if self.is_mounted else display_width(self.sentence)
         return Text(
-            truncate_display(self.sentence, width),
+            fit_documentation(self.sentence, width),
             no_wrap=True,
             overflow="crop",
         )
 
 
 class CommandInput(Widget):
-    """One-row editor drawing prompt, editable text, cursor, and atomic chip."""
+    """One-row editor with a fixed mode and a separate top rule."""
 
     can_focus = True
 
     DEFAULT_CSS = """
     CommandInput {
         width: 100%;
-        height: 1;
+        height: 2;
+        border-top: solid $foreground;
         overflow: hidden hidden;
     }
     """
@@ -1374,6 +1151,10 @@ class CommandInput(Widget):
         return format_prompt(self.listener)
 
     @property
+    def mode(self) -> str:
+        return format_mode(self.listener)
+
+    @property
     def editor_prefix(self) -> str:
         return (
             "narrow "
@@ -1399,24 +1180,24 @@ class CommandInput(Widget):
             cursor_offset = offset
         return "".join(body), cursor_offset
 
-    @property
-    def display_text(self) -> str:
+    def _editor_body_and_cursor(self) -> tuple[str, int]:
         if self._python_editing:
-            body, _ = self._python_body_and_cursor()
-            return self.prompt + body
-        text = self.prompt + self.editor_prefix + self.listener.input_text
+            return self._python_body_and_cursor()
+        text = self.editor_prefix + self.listener.input_text
         chip = self.listener.chip
         if chip is not None and self.listener.pending_substring_listing is None:
             text += f" ⟨{chip.presentation_type.name}: {chip.label}⟩"
-        return text
+        return text, len(self.editor_prefix) + self.cursor_position
+
+    @property
+    def display_text(self) -> str:
+        body, _ = self._editor_body_and_cursor()
+        return self.mode + " │ " + self.prompt + body
 
     def _cursor_index(self, text: str) -> int:
-        input_start = len(self.prompt) + len(self.editor_prefix)
-        if self._python_editing:
-            _, offset = self._python_body_and_cursor()
-            candidate = input_start + offset
-        else:
-            candidate = input_start + self.cursor_position
+        _, offset = self._editor_body_and_cursor()
+        input_start = len(self.mode) + len(" │ ") + len(self.prompt)
+        candidate = input_start + offset
         if candidate < len(text):
             if _character_width(text[candidate]) > 0:
                 return candidate
@@ -1432,6 +1213,7 @@ class CommandInput(Widget):
         if cursor_index == len(text):
             text += " "
         renderable = Text(text, no_wrap=True, overflow="crop")
+        renderable.stylize(Style(bold=True), 0, len(self.mode))
         if self.has_focus:
             renderable.stylize(Style(reverse=True), cursor_index, cursor_index + 1)
         return renderable
@@ -1439,11 +1221,35 @@ class CommandInput(Widget):
     def render(self) -> Text:
         return self.renderable
 
-    def render_line(self, y: int) -> Strip:
-        width = max(0, self.content_size.width)
-        if y != 0 or width == 0:
-            return Strip.blank(width, self.visual_style.rich_style)
-        renderable = self.renderable
+    def _short_prompt(self, width: int) -> str:
+        """Spend cells on the prompt while saving one for the editor."""
+
+        prompt = self.prompt
+        if display_width(prompt) + 1 <= width:
+            return prompt
+        suffix = (
+            " ...> "
+            if self.listener.pending_substring_listing is None
+            and self.listener.pending_python_pieces
+            else "> "
+        )
+        fixed = "pbui:"
+        cwd = escape_display(self.listener.cwd)
+        fixed_width = display_width(fixed + suffix)
+        editor_reserve = min(8, max(1, width - fixed_width - 1))
+        budget = width - fixed_width - editor_reserve
+        if budget < 1:
+            return truncate_display(fixed + "…" + suffix, width)
+        kept: list[str] = []
+        used = 1
+        for cluster, cells in reversed(_display_clusters(cwd)):
+            if used + cells > budget:
+                break
+            kept.append(cluster)
+            used += cells
+        return fixed + "…" + "".join(reversed(kept)) + suffix
+
+    def _draw_text(self, renderable: Text) -> Strip:
         options = self.app.console.options.update(
             width=max(1, display_width(renderable.plain)),
             height=1,
@@ -1451,18 +1257,38 @@ class CommandInput(Widget):
             overflow="crop",
         )
         rendered = self.app.console.render_lines(
-            renderable,
-            options,
-            style=self.visual_style.rich_style,
-            pad=False,
-            new_lines=False,
+            renderable, options, style=self.visual_style.rich_style,
+            pad=False, new_lines=False,
         )
-        strip = Strip(rendered[0] if rendered else [])
-        cursor_column = display_width(
-            renderable.plain[: self._cursor_index(renderable.plain)]
-        )
-        left = max(0, cursor_column - width + 1)
-        return strip.crop(left, left + width).adjust_cell_length(
+        return Strip(rendered[0] if rendered else [])
+
+    def render_line(self, y: int) -> Strip:
+        width = max(0, self.content_size.width)
+        if y != 0 or width == 0:
+            return Strip.blank(width, self.visual_style.rich_style)
+        mode = self.mode
+        prefix = Text(mode, no_wrap=True, overflow="crop")
+        prefix.stylize(Style(bold=True), 0, len(mode))
+        if width > display_width(mode):
+            separator = " │ "
+            remaining = width - display_width(mode + separator)
+            prefix.append(separator)
+            if remaining > 0:
+                prefix.append(self._short_prompt(remaining))
+        prefix_width = min(width, display_width(prefix.plain))
+        prefix_strip = self._draw_text(prefix).crop(0, prefix_width)
+        editor_width = width - prefix_width
+        if editor_width == 0:
+            return prefix_strip.adjust_cell_length(width, self.visual_style.rich_style)
+
+        body, cursor_index = self._editor_body_and_cursor()
+        editor = Text(body + " ", no_wrap=True, overflow="crop")
+        if self.has_focus:
+            editor.stylize(Style(reverse=True), cursor_index, cursor_index + 1)
+        cursor_column = display_width(body[:cursor_index])
+        left = max(0, cursor_column - editor_width + 1)
+        editor_strip = self._draw_text(editor).crop(left, left + editor_width)
+        return Strip.join((prefix_strip, editor_strip)).adjust_cell_length(
             width, self.visual_style.rich_style
         )
 
@@ -1534,6 +1360,18 @@ class ListenerScreen(Screen[None]):
         else:
             surface.clear_pointer()
 
+    def _exposed_tutorial_control(self, pointer: Offset) -> Presentation | None:
+        surface = self.history_surface
+        region = surface.scrollable_content_region
+        if pointer not in region:
+            return None
+        target = surface._hit_at_offset(
+            Offset(pointer.x - region.x, pointer.y - region.y)
+        )
+        return target if _domain_kind(self.listener, target) in {
+            "TutorialTarget", "TutorialTry",
+        } else None
+
     def on_leave(self, event: events.Leave) -> None:
         if event.node is self:
             self.close_menu()
@@ -1558,9 +1396,11 @@ class ListenerScreen(Screen[None]):
     def refresh_menu_documentation(self) -> None:
         item = self.action_menu.hovered_presentation
         sentence = (
-            _MENU_DOCUMENTATION
+            MENU_BORDER_DOCUMENTATION
             if item is None
-            else _menu_item_documentation(item.value, self.listener)
+            else format_menu_item_documentation(
+                self.listener, item.value.label, item.value.target
+            )
         )
         self.documentation_line.set_override(sentence)
 
@@ -1615,13 +1455,13 @@ class ListenerScreen(Screen[None]):
             anchor = opening_anchor(pointer_cell, pointer_hits, self._visible_cells(target))
         if anchor is None:
             self.documentation_line.set_override(
-                "Point at the object to open its menu."
+                format_popup_failure(target, self.listener, too_large=False)
             )
             return
         geometry = place_menu(labels, self._history_bounds(), anchor)
         if geometry is None:
             self.documentation_line.set_override(
-                "The action menu does not fit in the history area."
+                format_popup_failure(target, self.listener, too_large=True)
             )
             return
         self.action_menu.open_for(
@@ -1678,6 +1518,17 @@ class ListenerScreen(Screen[None]):
         self.remember_pointer(event)
         pointer = event.screen_offset
         if not geometry.rect.contains(pointer.x, pointer.y):
+            target = self._exposed_tutorial_control(pointer)
+            if target is not None:
+                surface = self.history_surface
+                region = surface.scrollable_content_region
+                surface._pointer_offset = Offset(
+                    pointer.x - region.x, pointer.y - region.y
+                )
+                surface.set_hovered_presentation(target)
+                self.documentation_line.set_override(None)
+                surface._refresh_documentation()
+                return True
             self.close_menu()
             return False
         self.action_menu.set_hovered_presentation(
@@ -1694,7 +1545,13 @@ class ListenerScreen(Screen[None]):
         self.remember_pointer(event)
         pointer = event.screen_offset
         if not geometry.rect.contains(pointer.x, pointer.y):
+            target = self._exposed_tutorial_control(pointer)
             self.close_menu()
+            if (
+                event.button == 1 and event.chain == 1
+                and _domain_kind(self.listener, target) == "TutorialTarget"
+            ):
+                self.history_surface.select_presentation(target)
             return
         item = self.action_menu.presentation_at_screen_cell(pointer.x, pointer.y)
         self.action_menu.set_hovered_presentation(item)

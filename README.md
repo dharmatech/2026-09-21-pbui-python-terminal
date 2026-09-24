@@ -31,10 +31,11 @@ it, its environment, and its dependencies with uv only.
 | [`popup`](docs/design/implementation/popup/README.md) | Menu beside the pointer, and a button documentation line | Implemented through popup 000 |
 | [`http`](docs/design/implementation/http/README.md) | GET requests, responses, and clickable JSON | Charter written, waiting for review |
 | [`tutorial`](docs/design/implementation/tutorial/README.md) | A short tour of cards inside the listener | Charter written, waiting for review |
+| [`bottom`](docs/design/implementation/bottom/README.md) | Mode on the input row, and a clearer documentation line | Charter written, waiting for review |
 
 A new discussion should read [`AGENTS.md`](AGENTS.md). The listener,
 listings, REPL, chips, SymPy, transcript, and popup specifications are
-the law for the program as it stands. The HTTP and tutorial charters
-are separate next explorations. The
+the law for the program as it stands. The HTTP, tutorial, and bottom
+charters are separate explorations. The
 [`transcript demo`](docs/design/implementation/transcript/demo.md) offers
 examples to try.

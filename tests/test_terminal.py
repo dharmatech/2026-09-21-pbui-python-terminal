@@ -298,11 +298,11 @@ async def test_empty_app_mounts_exact_fixed_regions(tmp_path):
         assert menu.region.height == 0
         assert not menu.is_open
         assert documentation.region.height == 1
-        assert command.region.height == 1
-        assert history.region.height == 10
+        assert command.region.height == 2
+        assert history.region.height == 9
         assert history.current_layout.rows == ()
         assert history.virtual_size.height == 0
-        assert documentation.sentence == "No presentation under pointer."
+        assert documentation.sentence == "NO TARGET"
 
 
 @pytest.mark.asyncio
@@ -674,55 +674,55 @@ def test_directory_colors_and_whole_process_row_styling(tmp_path):
 def test_documentation_formatter_covers_normative_table(tmp_path):
     listener = make_listener(tmp_path)
     item = domain_presentations(listener)
-    assert format_documentation(listener, None) == "No presentation under pointer."
+    assert format_documentation(listener, None) == "NO TARGET"
     assert format_documentation(listener, item["File"]) == (
-        "Left: show file “a name”. Right: menu."
+        "FILE “a name” • Left: show • Right: menu"
     )
     assert format_documentation(listener, item["Directory"]) == (
-        "Left: show directory “a directory”. Right: menu."
+        "DIRECTORY “a directory” • Left: show • Right: menu"
     )
     assert format_documentation(listener, item["Process"]) == (
-        "Left: show process 42. Right: menu."
+        "PROCESS 42 • Left: show • Right: menu"
     )
     assert format_documentation(listener, item["Text"]) == (
-        "Left: no action for Text. Right: no menu."
+        "TEXT • Left: no action • Right: no menu"
     )
     assert format_documentation(listener, item["Error"]) == (
-        "Left: no action for Error. Right: no menu."
+        "ERROR • Left: no action • Right: no menu"
     )
 
     cases = {
         "rm": [
-            "Accept File for rm: point to a highlighted File and click; Ctrl-G or Esc cancels.",
-            "Left: use file “a name” and run rm. Right: no menu.",
-            "Left: cannot use Directory for rm; File required. Right: no menu.",
-            "Left: cannot use Process for rm; File required. Right: no menu.",
-            "Left: cannot use Text for rm; File required. Right: no menu.",
-            "Left: cannot use Error for rm; File required. Right: no menu.",
+            "SELECTING FILE FOR rm • Point at highlighted File and click • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING FILE FOR rm — FILE “a name” • Left: use and run command • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING FILE FOR rm — DIRECTORY “a directory” • Left: cannot use Directory; File required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING FILE FOR rm — PROCESS 42 • Left: cannot use Process; File required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING FILE FOR rm — TEXT • Left: cannot use Text; File required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING FILE FOR rm — ERROR • Left: cannot use Error; File required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
         ],
         "cd": [
-            "Accept Directory for cd: point to a highlighted Directory and click; Ctrl-G or Esc cancels.",
-            "Left: cannot use File for cd; Directory required. Right: no menu.",
-            "Left: use directory “a directory” and run cd. Right: no menu.",
-            "Left: cannot use Process for cd; Directory required. Right: no menu.",
-            "Left: cannot use Text for cd; Directory required. Right: no menu.",
-            "Left: cannot use Error for cd; Directory required. Right: no menu.",
+            "SELECTING DIRECTORY FOR cd • Point at highlighted Directory and click • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING DIRECTORY FOR cd — FILE “a name” • Left: cannot use File; Directory required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING DIRECTORY FOR cd — DIRECTORY “a directory” • Left: use and run command • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING DIRECTORY FOR cd — PROCESS 42 • Left: cannot use Process; Directory required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING DIRECTORY FOR cd — TEXT • Left: cannot use Text; Directory required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING DIRECTORY FOR cd — ERROR • Left: cannot use Error; Directory required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
         ],
         "kill": [
-            "Accept Process for kill: point to a highlighted Process and click; Ctrl-G or Esc cancels.",
-            "Left: cannot use File for kill; Process required. Right: no menu.",
-            "Left: cannot use Directory for kill; Process required. Right: no menu.",
-            "Left: use process 42 and run kill. Right: no menu.",
-            "Left: cannot use Text for kill; Process required. Right: no menu.",
-            "Left: cannot use Error for kill; Process required. Right: no menu.",
+            "SELECTING PROCESS FOR kill • Point at highlighted Process and click • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING PROCESS FOR kill — FILE “a name” • Left: cannot use File; Process required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING PROCESS FOR kill — DIRECTORY “a directory” • Left: cannot use Directory; Process required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING PROCESS FOR kill — PROCESS 42 • Left: use and run command • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING PROCESS FOR kill — TEXT • Left: cannot use Text; Process required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING PROCESS FOR kill — ERROR • Left: cannot use Error; Process required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
         ],
         "show": [
-            "Accept File, Directory, or Process for show: point to a highlighted File, Directory, or Process and click; Ctrl-G or Esc cancels.",
-            "Left: use file “a name” and run show. Right: no menu.",
-            "Left: use directory “a directory” and run show. Right: no menu.",
-            "Left: use process 42 and run show. Right: no menu.",
-            "Left: cannot use Text for show; File, Directory, or Process required. Right: no menu.",
-            "Left: cannot use Error for show; File, Directory, or Process required. Right: no menu.",
+            "SELECTING FILE/DIRECTORY/PROCESS FOR show • Point at highlighted File, Directory, or Process and click • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING FILE/DIRECTORY/PROCESS FOR show — FILE “a name” • Left: use and run command • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING FILE/DIRECTORY/PROCESS FOR show — DIRECTORY “a directory” • Left: use and run command • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING FILE/DIRECTORY/PROCESS FOR show — PROCESS 42 • Left: use and run command • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING FILE/DIRECTORY/PROCESS FOR show — TEXT • Left: cannot use Text; File, Directory, or Process required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING FILE/DIRECTORY/PROCESS FOR show — ERROR • Left: cannot use Error; File, Directory, or Process required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
         ],
     }
     pointers = [None, item["File"], item["Directory"], item["Process"], item["Text"], item["Error"]]
@@ -734,7 +734,7 @@ def test_documentation_formatter_covers_normative_table(tmp_path):
     counterfeit = Presentation(30_000, PresentationType("File"), FileRef("/tmp/x"))
     listener.cancel()
     assert format_documentation(listener, counterfeit) == (
-        "No presentation under pointer."
+        "NO TARGET"
     )
 
 
@@ -754,28 +754,28 @@ def test_listing_header_documentation_and_all_accept_refusals(tmp_path):
         process_listing.header_presentation,
     )
     assert format_documentation(listener, headers[0]) == (
-        "Left: no action on this directory listing. Right: menu."
+        "DIRECTORY LISTING • Left: no action • Right: menu"
     )
     assert format_documentation(listener, headers[1]) == (
-        "Left: no action on this process listing. Right: menu."
+        "PROCESS LISTING • Left: no action • Right: menu"
     )
 
     expected = {
         "rm": (
-            "Left: cannot use DirectoryListing for rm; File required. Right: no menu.",
-            "Left: cannot use ProcessListing for rm; File required. Right: no menu.",
+            "SELECTING FILE FOR rm — DIRECTORY LISTING • Left: cannot use DirectoryListing; File required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING FILE FOR rm — PROCESS LISTING • Left: cannot use ProcessListing; File required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
         ),
         "cd": (
-            "Left: cannot use DirectoryListing for cd; Directory required. Right: no menu.",
-            "Left: cannot use ProcessListing for cd; Directory required. Right: no menu.",
+            "SELECTING DIRECTORY FOR cd — DIRECTORY LISTING • Left: cannot use DirectoryListing; Directory required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING DIRECTORY FOR cd — PROCESS LISTING • Left: cannot use ProcessListing; Directory required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
         ),
         "kill": (
-            "Left: cannot use DirectoryListing for kill; Process required. Right: no menu.",
-            "Left: cannot use ProcessListing for kill; Process required. Right: no menu.",
+            "SELECTING PROCESS FOR kill — DIRECTORY LISTING • Left: cannot use DirectoryListing; Process required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING PROCESS FOR kill — PROCESS LISTING • Left: cannot use ProcessListing; Process required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
         ),
         "show": (
-            "Left: cannot use DirectoryListing for show; File, Directory, or Process required. Right: no menu.",
-            "Left: cannot use ProcessListing for show; File, Directory, or Process required. Right: no menu.",
+            "SELECTING FILE/DIRECTORY/PROCESS FOR show — DIRECTORY LISTING • Left: cannot use DirectoryListing; File, Directory, or Process required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
+            "SELECTING FILE/DIRECTORY/PROCESS FOR show — PROCESS LISTING • Left: cannot use ProcessListing; File, Directory, or Process required • Right: no menu • Esc: cancel • Ctrl-G: cancel",
         ),
     }
     for command, sentences in expected.items():
@@ -804,16 +804,16 @@ def test_truncated_command_documentation_uses_cached_field_and_exact_boundaries(
         presentation.value.pid: presentation
         for presentation in listing.member_presentations
     }
-    ordinary_10 = "Left: show process 10. Right: menu."
-    ordinary_11 = "Left: show process 11. Right: menu."
-    ordinary_12 = "Left: show process 12. Right: menu."
+    ordinary_10 = "PROCESS 10 • Left: show • Right: menu"
+    ordinary_11 = "PROCESS 11 • Left: show • Right: menu"
+    ordinary_12 = "PROCESS 12 • Left: show • Right: menu"
     assert format_documentation(listener, by_pid[10], 42) == ordinary_10
     assert format_documentation(listener, by_pid[11], 41) == ordinary_11
     assert format_documentation(listener, by_pid[11], 42) == (
-        "Left: show the full command for process 11 (command is truncated). Right: menu."
+        "PROCESS 11 (command truncated) • Left: show full command • Right: menu"
     )
     assert format_documentation(listener, by_pid[11], 89) == (
-        "Left: show the full command for process 11 (command is truncated). Right: menu."
+        "PROCESS 11 (command truncated) • Left: show full command • Right: menu"
     )
     assert format_documentation(listener, by_pid[11], 90) == ordinary_11
     assert format_documentation(listener, by_pid[12], 42) == ordinary_12
@@ -867,7 +867,7 @@ async def test_wrapped_command_field_refreshes_documentation_without_restyling(
 
         x, y = _offset_for_logical_column(surface, long_process, 41)
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
-        assert documentation.sentence == "Left: show process 21. Right: menu."
+        assert documentation.sentence == "PROCESS 21 • Left: show • Right: menu"
         assert surface.pointer_logical_column == 41
         assert built_rows
 
@@ -875,7 +875,7 @@ async def test_wrapped_command_field_refreshes_documentation_without_restyling(
         x, y = _offset_for_logical_column(surface, long_process, 42)
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
         assert documentation.sentence == (
-            "Left: show the full command for process 21 (command is truncated). Right: menu."
+            "PROCESS 21 (command truncated) • Left: show full command • Right: menu"
         )
         assert surface.pointer_logical_column == 42
         assert built_rows == []
@@ -883,21 +883,21 @@ async def test_wrapped_command_field_refreshes_documentation_without_restyling(
         x, y = _offset_for_logical_column(surface, long_process, 89)
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
         assert documentation.sentence == (
-            "Left: show the full command for process 21 (command is truncated). Right: menu."
+            "PROCESS 21 (command truncated) • Left: show full command • Right: menu"
         )
         assert surface.pointer_logical_column == 89
         assert built_rows == []
 
         x, y = _offset_for_logical_column(surface, long_process, 41)
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
-        assert documentation.sentence == "Left: show process 21. Right: menu."
+        assert documentation.sentence == "PROCESS 21 • Left: show • Right: menu"
         assert built_rows == []
 
         long_start = long_process.intervals[0].physical_row
         short_start = short_process.intervals[0].physical_row
         surface.scroll_to_row(short_start - long_start)
         assert documentation.sentence != (
-            "Left: show the full command for process 21 (command is truncated). Right: menu."
+            "PROCESS 21 (command truncated) • Left: show full command • Right: menu"
         )
 
         await pilot.resize_terminal(28, 14)
@@ -925,7 +925,7 @@ def test_prompt_cursor_and_atomic_chip_are_passive_listener_drawing(tmp_path):
     listener.set_input_text("show")
     command = CommandInput(listener)
     assert command.prompt == f"pbui:{tmp_path}> "
-    assert command.display_text == f"pbui:{tmp_path}> show"
+    assert command.display_text == f"PYTHON │ pbui:{tmp_path}> show"
     command.cursor_position = 2
     assert command.cursor_position == 2
     command.cursor_position = 100
@@ -935,7 +935,7 @@ def test_prompt_cursor_and_atomic_chip_are_passive_listener_drawing(tmp_path):
     listener.state.chip = Chip(listener.types.file, original, "[literal] name")
     listener.set_input_text("show")
     assert command.display_text == (
-        f"pbui:{tmp_path}> show ⟨File: [literal] name⟩"
+        f"PYTHON │ pbui:{tmp_path}> show ⟨File: [literal] name⟩"
     )
     assert listener.chip is not None and listener.chip.value is original
     assert listener.input_text == "show"
@@ -1219,8 +1219,8 @@ async def test_wrapped_listing_anchor_survives_replacement_and_resizes(tmp_path)
         assert member in _top_logical_row(surface).presentations
         assert int(surface.scroll_y) - _first_physical_row(surface, _top_logical_row(surface)) == 1
         assert app.screen.documentation_line.region.height == 1
-        assert app.screen.command_input.region.height == 1
-        assert app.screen.history_surface.region.height == 7
+        assert app.screen.command_input.region.height == 2
+        assert app.screen.history_surface.region.height == 6
 
 
 @pytest.mark.asyncio
@@ -1335,19 +1335,19 @@ async def test_hover_and_documentation_rehit_after_view_resize_and_pointer_exit(
         first_member = next(row for row in listener.history.rows if row.presentations == (listing.member_presentations[0],))
         y = _first_physical_row(surface, first_member) - int(surface.scroll_y)
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, y))
-        assert documentation.sentence == "Left: show process 1. Right: menu."
+        assert documentation.sentence == "PROCESS 1 • Left: show • Right: menu"
 
         revision = listener.history.revision
         assert listener.apply_listing_view(listing, "sort", "state")
         surface.synchronize()
         assert listener.history.revision == revision + 2
         assert surface.hovered_presentation is listing.member_presentations[1]
-        assert documentation.sentence == "Left: show process 2. Right: menu."
+        assert documentation.sentence == "PROCESS 2 • Left: show • Right: menu"
 
         assert listener.apply_listing_view(listing, "narrow", "worker-1")
         surface.synchronize()
         assert surface.hovered_presentation is listing.member_presentations[0]
-        assert documentation.sentence == "Left: show process 1. Right: menu."
+        assert documentation.sentence == "PROCESS 1 • Left: show • Right: menu"
 
         await pilot.resize_terminal(26, 12)
         assert surface.hovered_presentation is surface.presentation_at_content_offset(0, y)
@@ -1360,7 +1360,7 @@ async def test_hover_and_documentation_rehit_after_view_resize_and_pointer_exit(
         await pilot.resize_terminal(26, 6)
         assert surface.pointer_offset is None
         assert surface.hovered_presentation is None
-        assert documentation.sentence == "No presentation under pointer."
+        assert documentation.sentence == "NO TARGET"
         assert listener.history.revision == revision + 4
 
 
@@ -1427,7 +1427,7 @@ async def test_visible_substring_accept_editor_submission_and_cancellation(tmp_p
         surface = app.screen.history_surface
         await pilot.press(*_key_names(":narrow"), "enter")
 
-        prefix = f"pbui:{tmp_path}> narrow "
+        prefix = f"SELECT TEXT FOR narrow │ pbui:{tmp_path}> narrow "
         assert listener.pending_substring_listing is listing
         assert listener.input_text == ""
         assert listener.chip is None
@@ -1435,8 +1435,7 @@ async def test_visible_substring_accept_editor_submission_and_cancellation(tmp_p
         assert command.cursor_position == 0
         assert command._cursor_index(command.display_text) == len(prefix)
         assert documentation.sentence == (
-            "Type a substring and press Enter to narrow this listing; "
-            "Ctrl-G or Esc cancels."
+            "SELECTING TEXT FOR narrow • Type substring; Enter: narrow listing • Esc: cancel • Ctrl-G: cancel"
         )
         rendered_documentation = documentation.render().plain
         assert "\n" not in rendered_documentation
@@ -1464,7 +1463,7 @@ async def test_visible_substring_accept_editor_submission_and_cancellation(tmp_p
         )
         assert listener.pending_substring_listing is listing
         assert listener.history.revision == revision
-        assert documentation.sentence.startswith("Type a substring")
+        assert documentation.sentence.startswith("SELECTING TEXT FOR narrow")
 
         await pilot.press("a", "b", "c", "home", "left", "backspace", "delete")
         assert listener.input_text == "bc"
@@ -1480,15 +1479,15 @@ async def test_visible_substring_accept_editor_submission_and_cancellation(tmp_p
         assert listener.pending_substring_listing is None
         assert listener.input_text == ""
         assert listener.history.revision == revision + 2
-        assert command.display_text == f"pbui:{tmp_path}> "
-        assert not documentation.sentence.startswith("Type a substring")
+        assert command.display_text == f"PYTHON │ pbui:{tmp_path}> "
+        assert not documentation.sentence.startswith("SELECTING TEXT FOR narrow")
 
         post_submit_revision = listener.history.revision
         await pilot.press(*_key_names(":narrow"), "enter", "q", "escape")
         assert listener.pending_substring_listing is None
         assert listener.input_text == ""
         assert listener.history.revision == post_submit_revision
-        assert command.display_text == f"pbui:{tmp_path}> "
+        assert command.display_text == f"PYTHON │ pbui:{tmp_path}> "
 
         await pilot.press(*_key_names(":narrow"), "enter", "z", "ctrl+g")
         assert listener.pending_substring_listing is None
@@ -1561,10 +1560,10 @@ async def test_enter_accept_cancel_and_typed_results_synchronize_views(tmp_path)
         command = app.screen.command_input
         surface = app.screen.history_surface
         documentation_prefixes = {
-            "rm": "Accept File for rm:",
-            "cd": "Accept Directory for cd:",
-            "kill": "Accept Process for kill:",
-            "show": "Accept File, Directory, or Process for show:",
+            "rm": "SELECTING FILE FOR rm",
+            "cd": "SELECTING DIRECTORY FOR cd",
+            "kill": "SELECTING PROCESS FOR kill",
+            "show": "SELECTING FILE/DIRECTORY/PROCESS FOR show",
         }
         for command_name in ("rm", "cd", "kill", "show"):
             listener.cancel()
@@ -1689,12 +1688,12 @@ async def test_coordinates_hover_click_selection_and_literal_misses(tmp_path, mo
         surface.on_mouse_move(move)
         assert surface.hovered_presentation is target_presentation
         assert app.screen.documentation_line.sentence == (
-            "Left: show file “file with space”. Right: menu."
+            "FILE “file with space” • Left: show • Right: menu"
         )
         surface.on_leave(events.Leave(surface))
         assert surface.hovered_presentation is None
         assert app.screen.documentation_line.sentence == (
-            "No presentation under pointer."
+            "NO TARGET"
         )
 
         calls = []
@@ -1870,7 +1869,7 @@ async def test_action_menu_private_presentations_labels_hits_and_documentation(t
             assert all(item.presentation_type is menu.menu_type for item in menu.item_presentations)
             assert all(item.value.target is target for item in menu.item_presentations)
             assert all(item.value.label == label for item, label in zip(menu.item_presentations, labels))
-            assert screen.documentation_line.sentence == "Click an item; Ctrl-G or Esc closes the menu."
+            assert screen.documentation_line.sentence == "NO TARGET • Click an item • Esc: close menu • Ctrl-G: close menu"
             rect = menu.geometry.rect
             history = surface.scrollable_content_region
             assert history.x <= rect.x and rect.x + rect.width <= history.x + history.width
@@ -1888,11 +1887,11 @@ async def test_action_menu_private_presentations_labels_hits_and_documentation(t
                 if item.presentation_type is listener.types.process
             )
             expected_documentation = {
-                listener.types.file: f"Left: run “{labels[0]}” for file “file name”. Right: no menu.",
-                listener.types.directory: f"Left: run “{labels[0]}” for directory “directory”. Right: no menu.",
-                listener.types.process: f"Left: run “{labels[0]}” for process {process_pid}. Right: no menu.",
-                listener.types.directory_listing: f"Left: apply “{labels[0]}” to this directory listing. Right: no menu.",
-                listener.types.process_listing: f"Left: apply “{labels[0]}” to this process listing. Right: no menu.",
+                listener.types.file: f"MENU “{labels[0]}” ON FILE “file name” • Left: run • Right: no menu",
+                listener.types.directory: f"MENU “{labels[0]}” ON DIRECTORY “directory” • Left: run • Right: no menu",
+                listener.types.process: f"MENU “{labels[0]}” ON PROCESS {process_pid} • Left: run • Right: no menu",
+                listener.types.directory_listing: f"MENU “{labels[0]}” ON DIRECTORY LISTING • Left: apply • Right: no menu",
+                listener.types.process_listing: f"MENU “{labels[0]}” ON PROCESS LISTING • Left: apply • Right: no menu",
             }[presentation_type]
             assert screen.documentation_line.sentence == expected_documentation
             assert set(surface.current_layout.presentations) == set(listener.history.presentations)
@@ -1935,11 +1934,11 @@ async def test_action_menu_gestures_refusals_modal_and_close_boundaries(tmp_path
         assert menu.labels == ("show", "rm")
         surface.on_click(_mouse_event(events.Click, surface, x, y, button=1, chain=2))
         assert menu.is_open
-        assert screen.documentation_line.sentence.startswith("Click an item")
+        assert screen.documentation_line.sentence.startswith("NO TARGET • Click an item")
         surface.on_leave(events.Leave(surface))
         assert menu.is_open
         _move_menu_index(menu, 0)
-        assert screen.documentation_line.sentence == "Left: run “show” for file “file”. Right: no menu."
+        assert screen.documentation_line.sentence == "MENU “show” ON FILE “file” • Left: run • Right: no menu"
         outside_surface, outside_x, outside_y = _outside_menu_cell(menu)
         outside_surface.on_mouse_move(_mouse_event(
             events.MouseMove, outside_surface, outside_x, outside_y
@@ -1989,14 +1988,14 @@ async def test_action_menu_gestures_refusals_modal_and_close_boundaries(tmp_path
             )
         )
         assert screen.documentation_line.sentence == (
-            "Left: move the cursor to a Python expression position to insert this value. Right: no menu."
+            "TEXT • Left: move cursor to Python expression position to insert • Right: no menu"
         )
         _open_menu_for(screen, None)
         assert screen.documentation_line.override_sentence is None
         listener.set_input_text("changed")
         screen.synchronize()
         assert screen.documentation_line.sentence == (
-            "Left: move the cursor to a Python expression position to insert this value. Right: no menu."
+            "TEXT • Left: move cursor to Python expression position to insert • Right: no menu"
         )
 
         listener.submit(": rm")
@@ -2009,7 +2008,7 @@ async def test_action_menu_gestures_refusals_modal_and_close_boundaries(tmp_path
         assert not menu.is_open
         assert listener.pending_request is pending
         assert screen.documentation_line.sentence == (
-            'Left: use file “file” and run rm. Right: no menu.'
+            'SELECTING FILE FOR rm — FILE “file” • Left: use and run command • Right: no menu • Esc: cancel • Ctrl-G: cancel'
         )
         listener.cancel()
         listener.submit(": narrow")
@@ -2194,7 +2193,7 @@ async def test_action_menu_open_close_and_view_keep_wrapped_viewport_anchor(tmp_
     _append_plain_rows(listener, 25, prefix="after-long-text")
     app = PbuiApp(listener)
 
-    async with app.run_test(size=(25, 11)) as pilot:
+    async with app.run_test(size=(25, 12)) as pilot:
         screen = app.screen
         surface = screen.history_surface
         first = _first_physical_row(surface, member_row)
@@ -2336,11 +2335,11 @@ async def test_repl_continuation_prompt_documentation_and_modal_keys(tmp_path):
             await pilot.press("enter")
             assert listener.pending_python_source == "if True:"
             assert listener.input_text == ""
-            assert editor.prompt == "...> "
+            assert editor.prompt == f"pbui:{tmp_path} ...> "
             assert screen.documentation_line.sentence == (
-                "Python continuation: enter another line; Ctrl-G or Esc discards it."
+                "NO TARGET • Python continuation: enter another line • Esc: discard • Ctrl-G: discard"
                 if cancel_key == "ctrl+g" else
-                "Left: move the cursor to a Python expression position to insert this value. Right: no menu."
+                "PYTHON VALUE • Left: move cursor to Python expression position to insert • Right: no menu"
             )
             before = listener.history.rows
             await pilot.press("ctrl+o")
@@ -2413,7 +2412,7 @@ async def test_repl_value_wrapped_hit_click_hover_accept_and_history_order(tmp_p
         assert surface.presentation_at_content_offset(0, y) is value
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, y))
         assert screen.documentation_line.sentence == (
-            "Left: show this Python value. Right: no menu."
+            "PYTHON VALUE • Left: show • Right: no menu"
         )
         _open_menu_for(screen, value)
         assert not screen.action_menu.is_open
@@ -2434,7 +2433,7 @@ async def test_repl_value_wrapped_hit_click_hover_accept_and_history_order(tmp_p
         y = value.intervals[1].physical_row - int(surface.scroll_y)
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, y))
         assert screen.documentation_line.sentence == (
-            "Left: cannot use Value for rm; File required. Right: no menu."
+            "SELECTING FILE FOR rm — PYTHON VALUE • Left: cannot use Value; File required • Right: no menu • Esc: cancel • Ctrl-G: cancel"
         )
         assert presentation_style(listener, value, value).dim
         before = listener.history.rows
@@ -2478,7 +2477,7 @@ async def test_repl_registered_value_menu_keeps_translator_indices(tmp_path):
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface,
             interval.start_column, interval.physical_row - int(surface.scroll_y)))
         assert screen.documentation_line.sentence == (
-            "Left: show this Python value. Right: menu."
+            "PYTHON VALUE • Left: show • Right: menu"
         )
         await pilot.press("ctrl+o")
         await pilot.pause()
@@ -2487,7 +2486,7 @@ async def test_repl_registered_value_menu_keeps_translator_indices(tmp_path):
         assert [p.value.translator_index for p in menu.item_presentations] == [0, 1, 2]
         _move_menu_index(menu, 1)
         assert screen.documentation_line.sentence == (
-            "Left: apply “show” to this Python value. Right: no menu."
+            "MENU “show” ON PYTHON VALUE • Left: apply • Right: no menu"
         )
         _click_menu_index(menu, 1)
         assert calls == [(1, original)]
@@ -2649,7 +2648,7 @@ async def test_python_click_refusal_documentation_and_continuation(tmp_path):
         editor.cursor_position = 2
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
         screen.synchronize()
-        assert screen.documentation_line.sentence == "Left: insert this value into the expression. Right: no menu."
+        assert screen.documentation_line.sentence == "PYTHON VALUE • Left: insert value into expression • Right: no menu"
         before = listener.history.rows
         surface.on_click(_mouse_event(events.Click, surface, x, y, button=1, chain=2))
         assert listener.python_pieces == ("f()",)
@@ -2657,7 +2656,7 @@ async def test_python_click_refusal_documentation_and_continuation(tmp_path):
         editor.cursor_position = 2
         screen.synchronize()
         assert screen.documentation_line.sentence == (
-            "Left: insertion unavailable in a string or comment. Right: no menu."
+            "PYTHON VALUE • Left: insertion unavailable in string or comment • Right: no menu"
         )
         surface.on_click(_mouse_event(events.Click, surface, x, y, button=1))
         assert listener.python_pieces == ('"abc"',) and listener.history.rows == before
@@ -2665,7 +2664,7 @@ async def test_python_click_refusal_documentation_and_continuation(tmp_path):
         editor.cursor_position = 1
         screen.synchronize()
         assert screen.documentation_line.sentence == (
-            "Left: move the cursor to a Python expression position to insert this value. Right: no menu."
+            "PYTHON VALUE • Left: move cursor to Python expression position to insert • Right: no menu"
         )
         surface.on_click(_mouse_event(events.Click, surface, x, y, button=1))
         assert listener.python_pieces == ("foo",) and listener.history.rows == before
@@ -2681,7 +2680,7 @@ async def test_python_click_refusal_documentation_and_continuation(tmp_path):
         listener.set_input_text("if True:")
         editor.cursor_position = len(listener.input_text)
         await pilot.press("enter")
-        assert editor.prompt == "...> "
+        assert editor.prompt == f"pbui:{tmp_path} ...> "
         assert "if True:" not in editor.display_text
         listener.set_input_text("    10 + ")
         editor.cursor_position = len(listener.input_text)
@@ -2750,7 +2749,7 @@ async def test_python_menu_narrow_suspends_and_restores_continuation(tmp_path):
         assert listener.pending_python_pieces == saved[0]
         assert listener.python_pieces == saved[1].pieces
         assert listener.python_cursor == saved[1].cursor
-        assert editor.has_focus and editor.prompt == "...> "
+        assert editor.has_focus and editor.prompt == f"pbui:{tmp_path} ...> "
         for key in ("ctrl+g", "escape"):
             _open_menu_for(screen, header)
             assert screen.action_menu.is_open
@@ -2878,7 +2877,7 @@ async def test_transcript_screen_command_chip_and_menu_yank(tmp_path):
         await pilot.pause()
         assert screen.action_menu.labels == ("yank",)
         _move_menu_index(screen.action_menu, 0)
-        assert screen.documentation_line.sentence == "Left: yank this input into the editor. Right: no menu."
+        assert screen.documentation_line.sentence == "MENU “yank” ON COMMAND INPUT • Left: yank into editor • Right: no menu"
         _click_menu_label(screen.action_menu, "yank")
         assert listener.input_text == ":rm"
         assert listener.chip.value is file.value
@@ -2912,7 +2911,7 @@ async def test_transcript_screen_action_click_and_menu_replay_preserve_compositi
             interval.physical_row - int(surface.scroll_y),
         ))
         assert screen.documentation_line.sentence == (
-            "Left: run “simplify” again on the same object. Right: menu."
+            "ACTION “simplify” • Left: run again on same object • Right: menu"
         )
         _click_history_presentation(screen, action)
         newer = [p for p in listener.history.presentations if p.type is listener.types.menu_action_input][-1]
@@ -2930,7 +2929,7 @@ async def test_transcript_screen_action_click_and_menu_replay_preserve_compositi
         assert screen.action_menu.labels == ("run again",)
         _move_menu_index(screen.action_menu, 0)
         assert screen.documentation_line.sentence == (
-            "Left: run “simplify” again on the same object. Right: no menu."
+            "MENU “run again” ON ACTION “simplify” • Left: run again on same object • Right: no menu"
         )
         _click_menu_label(screen.action_menu, "run again")
         assert (listener.python_pieces, listener.python_cursor) == before
@@ -2961,9 +2960,9 @@ async def test_transcript_documentation_recomputes_at_stationary_pointer(tmp_pat
         surface = screen.history_surface
         editor = screen.command_input
         for target, expected in (
-            (python, "Left: load this Python form into the editor; Enter runs it. Right: menu."),
-            (command, "Left: load this command into the editor; Enter runs it. Right: menu."),
-            (action, "Left: run “expand” again on the same object. Right: menu."),
+            (python, "PYTHON INPUT • Left: load into editor; Enter runs • Right: menu"),
+            (command, "COMMAND INPUT • Left: load into editor; Enter runs • Right: menu"),
+            (action, "ACTION “expand” • Left: run again on same object • Right: menu"),
         ):
             interval = target.intervals[0]
             surface.scroll_to_row(interval.physical_row)
@@ -2982,14 +2981,14 @@ async def test_transcript_documentation_recomputes_at_stationary_pointer(tmp_pat
         listener.set_input_text("f()")
         editor.cursor_position = 2
         screen.synchronize()
-        assert screen.documentation_line.sentence == "Left: insert this input at the cursor. Right: menu."
+        assert screen.documentation_line.sentence == "PYTHON INPUT • Left: insert at cursor • Right: menu"
         interval = command.intervals[0]
         surface.scroll_to_row(interval.physical_row)
         surface.on_mouse_move(_mouse_event(
             events.MouseMove, surface, interval.start_column,
             interval.physical_row - int(surface.scroll_y),
         ))
-        assert screen.documentation_line.sentence == "Left: insert this input at the cursor. Right: menu."
+        assert screen.documentation_line.sentence == "COMMAND INPUT • Left: insert at cursor • Right: menu"
         interval = action.intervals[0]
         surface.scroll_to_row(interval.physical_row)
         surface.on_mouse_move(_mouse_event(
@@ -3000,19 +2999,19 @@ async def test_transcript_documentation_recomputes_at_stationary_pointer(tmp_pat
         editor.cursor_position = 2
         screen.synchronize()
         assert screen.documentation_line.sentence == (
-            "Left: insert this value into the expression. Right: menu."
+            "ACTION “expand” • Left: insert target into expression • Right: menu"
         )
         listener.set_input_text('"abc"')
         editor.cursor_position = 2
         screen.synchronize()
         assert screen.documentation_line.sentence == (
-            "Left: insertion unavailable in a string or comment. Right: menu."
+            "ACTION “expand” • Left: insertion unavailable in string or comment • Right: menu"
         )
         listener.set_input_text("foo")
         editor.cursor_position = 1
         screen.synchronize()
         assert screen.documentation_line.sentence == (
-            "Left: move the cursor to a Python expression position to insert this value. Right: menu."
+            "ACTION “expand” • Left: move cursor to Python expression position to insert • Right: menu"
         )
         listener.set_input_text("f()")
         editor.cursor_position = 2
@@ -3027,16 +3026,16 @@ async def test_transcript_documentation_recomputes_at_stationary_pointer(tmp_pat
         screen.synchronize()
         listener.submit(":rm")
         screen.synchronize()
-        assert "cannot use PythonInput for rm; File required" in format_documentation(listener, python)
-        assert "cannot use CommandInput for rm; File required" in format_documentation(listener, command)
-        assert "cannot use MenuActionInput for rm; File required" in format_documentation(listener, action)
+        assert "cannot use PythonInput; File required" in format_documentation(listener, python)
+        assert "cannot use CommandInput; File required" in format_documentation(listener, command)
+        assert "cannot use MenuActionInput; File required" in format_documentation(listener, action)
         revision = listener.history.revision
         _click_history_presentation(screen, python)
         assert listener.pending_request is not None
         assert listener.history.revision == revision
-        assert screen.documentation_line.sentence.startswith("Left: cannot use PythonInput for rm;")
+        assert screen.documentation_line.sentence.startswith("SELECTING FILE FOR rm — PYTHON INPUT • Left: cannot use PythonInput;")
         await pilot.press("ctrl+g")
-        assert format_documentation(listener, None) == "No presentation under pointer."
+        assert format_documentation(listener, None) == "NO TARGET"
 
 
 @pytest.mark.asyncio
@@ -3246,7 +3245,7 @@ async def test_popup_overlays_history_without_changing_rows_or_viewport(tmp_path
         y = interval.physical_row - int(surface.scroll_y)
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
         assert screen.documentation_line.sentence == (
-            "Left: show this SymPy expression. Right: menu."
+            "SYMPY EXPRESSION • Left: show • Right: menu"
         )
         history_region = surface.region
         documentation_region = screen.documentation_line.region
@@ -3300,7 +3299,7 @@ async def test_popup_clamping_hover_border_clicks_and_outside_routing(tmp_path):
         assert menu.geometry.rect.y + menu.geometry.rect.height == region.y + region.height
         assert menu.hovered_presentation is menu.item_presentations[1]
         assert screen.documentation_line.sentence == (
-            f"Left: run “rm” for file “{file_path.name}”. Right: no menu."
+            f"MENU “rm” ON FILE “{file_path.name}” • Left: run • Right: no menu"
         )
         # Border and non-left clicks stay inert, as do later clicks in a chain.
         rect = menu.geometry.rect
@@ -3311,7 +3310,7 @@ async def test_popup_clamping_hover_border_clicks_and_outside_routing(tmp_path):
         _click_menu_index(menu, 1, button=3)
         _click_menu_index(menu, 1, chain=2)
         assert menu.is_open and file_path.exists()
-        assert screen.documentation_line.sentence.endswith("Right: no menu.")
+        assert screen.documentation_line.sentence.endswith("Right: no menu")
         # The blank right padding belongs to the item row.
         before = listener.history.revision
         _click_menu_index(menu, 0, x=rect.width - 2)
@@ -3383,7 +3382,7 @@ async def test_popup_ctrl_o_anchor_resize_scroll_and_colon_yank(tmp_path):
                                        surface.scrollable_content_region.y))
         assert not screen.action_menu.is_open
         assert screen.documentation_line.sentence == (
-            "The action menu does not fit in the history area."
+            "FILE “file” • Menu does not fit in history area"
         )
 
         await pilot.resize_terminal(30, 12)
@@ -3400,7 +3399,7 @@ async def test_popup_ctrl_o_anchor_resize_scroll_and_colon_yank(tmp_path):
         surface.set_hovered_presentation(file)
         await pilot.press("ctrl+o")
         assert not screen.action_menu.is_open
-        assert screen.documentation_line.sentence == "Point at the object to open its menu."
+        assert screen.documentation_line.sentence == "FILE “file” • Point at object to open its menu"
 
         surface.scroll_to_row(saved.intervals[0].physical_row)
         listener.set_input_text(":show")
@@ -3411,7 +3410,7 @@ async def test_popup_ctrl_o_anchor_resize_scroll_and_colon_yank(tmp_path):
         assert screen.action_menu.labels == ("yank",)
         _move_menu_index(screen.action_menu, 0)
         assert screen.documentation_line.sentence == (
-            "Left: no action while editing a command. Right: no menu."
+            "MENU “yank” ON COMMAND INPUT • Left: no action while editing command • Right: no menu"
         )
         before = listener.input_text
         _click_menu_label(screen.action_menu, "yank")
@@ -3441,14 +3440,14 @@ async def test_http_screen_menus_json_dig_and_wrapped_member_hits(tmp_path):
         x, y = interval.start_column, interval.physical_row - int(surface.scroll_y)
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
         assert screen.documentation_line.sentence == (
-            'Left: show this Python value. Right: menu.'
+            'GET REQUEST “https://example.org/tree.json” • Left: show • Right: menu'
         )
         await pilot.press('ctrl+o')
         assert screen.action_menu.target is request
         assert screen.action_menu.labels == ('perform',)
         _move_menu_index(screen.action_menu, 0)
         assert screen.documentation_line.sentence == (
-            'Left: apply “perform” to this Python value. Right: no menu.'
+            'MENU “perform” ON GET REQUEST “https://example.org/tree.json” • Left: apply • Right: no menu'
         )
         menu = screen.action_menu
         border = menu.geometry.rect
@@ -3458,7 +3457,7 @@ async def test_http_screen_menus_json_dig_and_wrapped_member_hits(tmp_path):
             border.y - region.y,
         ))
         assert screen.documentation_line.sentence == (
-            'Click an item; Ctrl-G or Esc closes the menu.'
+            'NO TARGET • Click an item • Esc: close menu • Ctrl-G: close menu'
         )
         _click_menu_label(menu, 'perform')
         assert calls == [request.value]
@@ -3550,7 +3549,7 @@ async def test_http_screen_json_documentation_chip_and_modal_precedence(tmp_path
         x, y = interval.start_column, interval.physical_row - int(surface.scroll_y)
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
         assert screen.documentation_line.sentence == (
-            "Left: list this JSON object's members. Right: no menu."
+            "JSON OBJECT (1 keys) • Left: list members • Right: no menu"
         )
         await pilot.press('ctrl+o')
         assert not screen.action_menu.is_open
@@ -3558,7 +3557,7 @@ async def test_http_screen_json_documentation_chip_and_modal_precedence(tmp_path
         editor.cursor_position = 2
         screen.synchronize()
         assert screen.documentation_line.sentence == (
-            'Left: insert this value into the expression. Right: no menu.'
+            'JSON OBJECT (1 keys) • Left: insert value into expression • Right: no menu'
         )
         before = listener.history.rows
         _click_history_presentation(screen, root)
@@ -3569,7 +3568,7 @@ async def test_http_screen_json_documentation_chip_and_modal_precedence(tmp_path
         editor.cursor_position = 2
         screen.synchronize()
         assert screen.documentation_line.sentence == (
-            'Left: insertion unavailable in a string or comment. Right: no menu.'
+            'JSON OBJECT (1 keys) • Left: insertion unavailable in string or comment • Right: no menu'
         )
         _click_history_presentation(screen, root)
         assert listener.history.rows == before
@@ -3577,7 +3576,7 @@ async def test_http_screen_json_documentation_chip_and_modal_precedence(tmp_path
         editor.cursor_position = 1
         screen.synchronize()
         assert screen.documentation_line.sentence == (
-            'Left: move the cursor to a Python expression position to insert this value. Right: no menu.'
+            'JSON OBJECT (1 keys) • Left: move cursor to Python expression position to insert • Right: no menu'
         )
         _click_history_presentation(screen, root)
         assert listener.history.rows == before
@@ -3595,7 +3594,7 @@ async def test_http_screen_json_documentation_chip_and_modal_precedence(tmp_path
         listener.submit(':rm')
         screen.synchronize()
         assert screen.documentation_line.sentence == (
-            'Left: cannot use Value for rm; File required. Right: no menu.'
+            'SELECTING FILE FOR rm — JSON OBJECT (1 keys) • Left: cannot use Value; File required • Right: no menu • Esc: cancel • Ctrl-G: cancel'
         )
         _click_history_presentation(screen, root)
         assert listener.pending_request is not None
@@ -3606,7 +3605,7 @@ async def test_http_screen_json_documentation_chip_and_modal_precedence(tmp_path
         screen.synchronize()
         assert listener.pending_substring_listing is not None
         assert screen.documentation_line.sentence == (
-            'Type a substring and press Enter to narrow this listing; Ctrl-G or Esc cancels.'
+            'SELECTING TEXT FOR narrow • Type substring; Enter: narrow listing • Esc: cancel • Ctrl-G: cancel'
         )
         before = listener.history.rows
         _click_history_presentation(screen, root)
@@ -3620,7 +3619,7 @@ async def test_http_screen_json_documentation_chip_and_modal_precedence(tmp_path
         y = interval.physical_row - int(surface.scroll_y)
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, interval.start_column, y))
         assert screen.documentation_line.sentence == (
-            "Left: list this JSON array's members. Right: no menu."
+            "JSON ARRAY (1 elements) • Left: list members • Right: no menu"
         )
         _click_history_presentation(screen, child)
         scalar = listener.history.rows[-1].presentations[0]
@@ -3630,7 +3629,7 @@ async def test_http_screen_json_documentation_chip_and_modal_precedence(tmp_path
             scalar.intervals[0].physical_row - int(surface.scroll_y),
         ))
         assert screen.documentation_line.sentence == (
-            'Left: show this Python value. Right: no menu.'
+            'PYTHON VALUE • Left: show • Right: no menu'
         )
 
 
@@ -3688,9 +3687,506 @@ async def test_http_screen_literal_trailer_is_inert(tmp_path):
         y = physical - int(surface.scroll_y)
         assert surface.presentation_at_content_offset(0, y) is None
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, y))
-        assert screen.documentation_line.sentence == 'No presentation under pointer.'
+        assert screen.documentation_line.sentence == 'NO TARGET'
         revision = listener.history.revision
         surface.on_click(_mouse_event(events.Click, surface, 0, y, button=1))
         surface.on_click(_mouse_event(events.Click, surface, 0, y, button=3))
         assert listener.history.revision == revision
         assert not screen.action_menu.is_open
+
+
+def _tutorial_presentation(listener, kind, *, direction=None, card=None):
+    presentation_type = {
+        "card": listener.types.tutorial_card,
+        "target": listener.types.tutorial_target,
+        "try": listener.types.tutorial_try,
+    }[kind]
+    return next(
+        item for item in reversed(listener.history.presentations)
+        if item.type is presentation_type
+        and (direction is None or item.value.direction == direction)
+        and (card is None or item.value is card)
+    )
+
+
+def _tutorial_cell(surface, presentation, interval_index=0):
+    interval = presentation.intervals[interval_index]
+    y = interval.physical_row - int(surface.scroll_y)
+    if not 0 <= y < surface.scrollable_content_region.height:
+        surface.scroll_to_row(interval.physical_row)
+        y = interval.physical_row - int(surface.scroll_y)
+    assert 0 <= y < surface.scrollable_content_region.height
+    return interval.start_column, y
+
+
+def _tutorial_click(surface, presentation, *, button=1, chain=1):
+    x, y = _tutorial_cell(surface, presentation)
+    surface.on_click(_mouse_event(
+        events.Click, surface, x, y, button=button, chain=chain
+    ))
+
+
+def _tutorial_hover(surface, presentation):
+    x, y = _tutorial_cell(surface, presentation)
+    surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
+
+
+@pytest.mark.asyncio
+async def test_tutorial_card_screen_hits_styles_wrapping_scroll_and_menus(tmp_path):
+    listener = make_listener(tmp_path)
+    listener.submit(":tutorial")
+    card = _tutorial_presentation(listener, "card")
+    back = _tutorial_presentation(listener, "target", direction="Back")
+    next_link = _tutorial_presentation(listener, "target", direction="Next")
+    up = _tutorial_presentation(listener, "target", direction="Up")
+    example = _tutorial_presentation(listener, "try")
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(28, 8)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        documentation = screen.documentation_line
+        rows = tuple(
+            row for row in listener.history.rows if card in row.presentations
+        )
+        assert len(rows) == 7
+        assert all(card in row.presentations for row in rows)
+        assert any(
+            sum(rendered.logical_row == index for rendered in surface.current_layout.rows) > 1
+            for index, row in enumerate(listener.history.rows) if row in rows
+        )
+        for row in rows:
+            first = _first_physical_row(surface, row)
+            segments = [
+                index for index, rendered in enumerate(surface.current_layout.rows)
+                if rendered.logical_row == surface.current_layout.rows[first].logical_row
+            ]
+            if not any(item in row.presentations for item in (example, back, next_link, up)):
+                for physical in segments:
+                    assert surface.current_layout.hit_test(0, physical) is card
+
+        for control in (back, next_link, up, example):
+            assert control.intervals
+            for interval in control.intervals:
+                assert surface.current_layout.hit_test(
+                    interval.start_column, interval.physical_row
+                ) is control
+        assert presentation_style(listener, back, back).dim
+        assert not presentation_style(listener, back, back).reverse
+        for control in (next_link, up, example):
+            assert presentation_style(listener, control, control).underline
+        _tutorial_hover(surface, back)
+        assert documentation.sentence == (
+            "TUTORIAL BACK • Left: no previous card • Right: no menu"
+        )
+        _tutorial_hover(surface, next_link)
+        assert documentation.sentence == (
+            "TUTORIAL NEXT “2. Colon commands” • Left: open • Right: no menu"
+        )
+        _tutorial_hover(surface, up)
+        assert documentation.sentence == (
+            "TUTORIAL UP “Contents” • Left: open • Right: no menu"
+        )
+        _tutorial_hover(surface, example)
+        assert documentation.sentence == (
+            "TUTORIAL TRY • Left: load example into editor; Enter runs • Right: no menu"
+        )
+        _tutorial_hover(surface, card)
+        assert documentation.sentence == (
+            "TUTORIAL CARD “1. Presentations” • Left: no action • Right: no menu"
+        )
+        before = listener.history.rows
+        _tutorial_click(surface, card)
+        _tutorial_click(surface, card, button=3)
+        _tutorial_click(surface, back)
+        _tutorial_click(surface, next_link, button=3)
+        _tutorial_click(surface, next_link, chain=2)
+        assert listener.history.rows == before
+        assert not screen.action_menu.is_open
+        _tutorial_hover(surface, next_link)
+        await pilot.press("ctrl+o")
+        assert not screen.action_menu.is_open
+        _tutorial_hover(surface, card)
+        await pilot.press("ctrl+o")
+        assert not screen.action_menu.is_open
+
+        example_row = next(row for row in rows if example in row.presentations)
+        first = _first_physical_row(surface, example_row)
+        assert surface.current_layout.hit_test(6, first) is card
+        await pilot.resize_terminal(16, 8)
+        await pilot.pause()
+        assert len(example.intervals) >= 1
+        assert surface.current_layout.hit_test(
+            example.intervals[-1].start_column, example.intervals[-1].physical_row
+        ) is example
+        _tutorial_hover(surface, example)
+        assert documentation.sentence.startswith("TUTORIAL TRY • Left: load example")
+        assert display_width(documentation.render().plain) <= documentation.content_size.width
+        _tutorial_click(surface, next_link)
+        assert _tutorial_presentation(listener, "card").value.title == "2. Colon commands"
+        assert card in listener.history.presentations
+        _append_plain_rows(listener, 500)
+        screen.synchronize()
+        assert card not in listener.history.presentations
+        assert next_link not in listener.history.presentations
+
+
+@pytest.mark.asyncio
+async def test_tutorial_navigation_and_try_editor_states(tmp_path):
+    listener = make_listener(tmp_path)
+    listener.submit(":tutorial")
+    first = _tutorial_presentation(listener, "card")
+    back = _tutorial_presentation(listener, "target", direction="Back")
+    next_link = _tutorial_presentation(listener, "target", direction="Next")
+    example = _tutorial_presentation(listener, "try")
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(95, 18)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        editor = screen.command_input
+        documentation = screen.documentation_line
+        before = listener.history.rows
+        _tutorial_click(surface, back)
+        assert listener.history.rows == before
+        _tutorial_click(surface, example, chain=2)
+        _tutorial_click(surface, example, button=3)
+        assert listener.input_text == ""
+        assert listener.history.rows == before
+        _tutorial_click(surface, example)
+        assert listener.input_text == "1 + 2 + 3"
+        assert editor.cursor_position == len(listener.input_text)
+        assert listener.history.rows == before
+        await pilot.press("left", "9")
+        assert listener.input_text == "1 + 2 + 93"
+        _tutorial_hover(surface, example)
+        assert documentation.sentence == (
+            "TUTORIAL TRY • Left: finish or cancel current input before trying • Right: no menu"
+        )
+        _tutorial_click(surface, example)
+        assert listener.input_text == "1 + 2 + 93"
+        listener.set_input_text("1 + 2 + 3")
+        screen.synchronize()
+        await pilot.press("enter")
+        assert listener.history.presentations[-1].value == 6
+        assert first in listener.history.presentations
+
+        listener.set_input_text(":ls")
+        editor.adopt_listener_cursor()
+        screen.synchronize()
+        old_cursor = editor.cursor_position
+        old_input = listener.input_text
+        before = listener.history.rows
+        _tutorial_click(surface, next_link)
+        second = _tutorial_presentation(listener, "card")
+        assert second.value.title == "2. Colon commands"
+        assert listener.input_text == old_input
+        assert editor.cursor_position == old_cursor
+        assert listener.history.rows[:len(before)] == before
+        assert all(
+            item.type not in {listener.types.python_input, listener.types.command_input}
+            for row in listener.history.rows[len(before):] for item in row.presentations
+        )
+        command_example = _tutorial_presentation(listener, "try")
+        _tutorial_hover(surface, command_example)
+        assert documentation.sentence.startswith("TUTORIAL TRY • Left: finish or cancel")
+        _tutorial_click(surface, command_example)
+        assert listener.input_text == ":ls"
+
+        listener.set_input_text("")
+        screen.synchronize()
+        before = listener.history.rows
+        _tutorial_click(surface, command_example)
+        assert listener.input_text == ":ls"
+        assert editor.cursor_position == 3
+        assert listener.history.rows == before
+
+        listener.set_input_text("")
+        screen.synchronize()
+        up = _tutorial_presentation(listener, "target", direction="Up")
+        _tutorial_click(surface, up)
+        contents = _tutorial_presentation(listener, "card")
+        assert contents.value.title == "Contents"
+        entry = next(
+            item for item in listener.history.presentations
+            if item.type is listener.types.tutorial_target
+            and item.value.direction == "Contents"
+            and item.value.destination.title == "5. Bring input back"
+        )
+        _tutorial_hover(surface, entry)
+        assert documentation.sentence == (
+            "TUTORIAL CONTENTS “5. Bring input back” • Left: open • Right: no menu"
+        )
+        _tutorial_click(surface, entry)
+        last = _tutorial_presentation(listener, "card")
+        assert last.value.title == "5. Bring input back"
+        last_next = _tutorial_presentation(listener, "target", direction="Next")
+        assert presentation_style(listener, last_next, last_next).dim
+        _tutorial_hover(surface, last_next)
+        assert documentation.sentence == (
+            "TUTORIAL NEXT • Left: no next card • Right: no menu"
+        )
+        before = listener.history.rows
+        _tutorial_click(surface, last_next)
+        assert listener.history.rows == before
+
+
+@pytest.mark.asyncio
+async def test_tutorial_controls_accept_continuation_popup_and_existing_hits(tmp_path):
+    (tmp_path / "sample").write_text("data")
+    listener = make_listener(tmp_path)
+    listener.submit("2")
+    value = next(item for item in listener.history.presentations if item.type is listener.types.value)
+    saved_input = next(
+        item for item in listener.history.presentations
+        if item.type is listener.types.python_input
+    )
+    listener.submit(":ls")
+    file = next(item for item in listener.history.presentations if item.type is listener.types.file)
+    listener.submit(":tutorial")
+    next_link = _tutorial_presentation(listener, "target", direction="Next")
+    example = _tutorial_presentation(listener, "try")
+    card = _tutorial_presentation(listener, "card")
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(100, 22)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        editor = screen.command_input
+        documentation = screen.documentation_line
+        listener.set_input_text("10 + ")
+        editor.adopt_listener_cursor()
+        screen.synchronize()
+        _tutorial_hover(surface, card)
+        assert documentation.sentence == (
+            "TUTORIAL CARD “1. Presentations” • Left: insert value into expression • Right: no menu"
+        )
+        _tutorial_click(surface, next_link)
+        assert listener.input_text == "10 + "
+        assert listener.chip is None
+        _tutorial_click(surface, value)
+        assert any(getattr(piece, "value", None) is value.value for piece in listener.python_pieces)
+        before = listener.history.rows
+        _tutorial_hover(surface, example)
+        assert documentation.sentence.startswith("TUTORIAL TRY • Left: finish or cancel")
+        _tutorial_click(surface, example)
+        assert listener.history.rows == before
+        assert any(getattr(piece, "value", None) is value.value for piece in listener.python_pieces)
+        listener.set_input_text("")
+        screen.synchronize()
+        _tutorial_click(surface, saved_input)
+        assert listener.input_text == "2"
+        listener.set_input_text("")
+        screen.synchronize()
+
+        listener.submit("if True:")
+        screen.synchronize()
+        assert listener.pending_python_pieces
+        _tutorial_hover(surface, example)
+        assert documentation.sentence.startswith("TUTORIAL TRY • Left: finish or cancel")
+        before = listener.history.rows
+        _tutorial_click(surface, example)
+        assert listener.history.rows == before and listener.input_text == ""
+        revision = listener.history.revision
+        _tutorial_click(surface, next_link)
+        assert listener.pending_python_pieces
+        assert listener.history.revision > revision
+        listener.cancel_python_continuation()
+
+        listener.submit(":rm")
+        screen.synchronize()
+        pending = listener.pending_request
+        _tutorial_hover(surface, card)
+        assert documentation.sentence == (
+            "SELECTING FILE FOR rm — TUTORIAL CARD “1. Presentations” • Left: cannot use TutorialCard; File required • Right: no menu • Esc: cancel • Ctrl-G: cancel"
+        )
+        _tutorial_hover(surface, next_link)
+        assert documentation.sentence == (
+            "SELECTING FILE FOR rm — TUTORIAL NEXT “2. Colon commands” • Left: open • Right: no menu • Esc: cancel • Ctrl-G: cancel"
+        )
+        _tutorial_hover(surface, example)
+        assert documentation.sentence.startswith("SELECTING FILE FOR rm — TUTORIAL TRY • Left: finish or cancel")
+        before = listener.history.rows
+        _tutorial_click(surface, example)
+        assert listener.history.rows == before
+        _tutorial_click(surface, next_link)
+        assert listener.pending_request is pending
+        assert listener.history.rows != before
+        listener.cancel()
+
+        listener.submit(":narrow")
+        screen.synchronize()
+        pending_listing = listener.pending_substring_listing
+        _tutorial_hover(surface, next_link)
+        assert documentation.sentence == (
+            "SELECTING TEXT FOR narrow — TUTORIAL NEXT “2. Colon commands” • Left: open • Right: no menu • Esc: cancel • Ctrl-G: cancel"
+        )
+        _tutorial_hover(surface, example)
+        assert documentation.sentence.startswith("SELECTING TEXT FOR narrow — TUTORIAL TRY • Left: finish or cancel")
+        _tutorial_click(surface, example)
+        assert listener.input_text == ""
+        _tutorial_click(surface, next_link)
+        assert listener.pending_substring_listing is pending_listing
+        listener.cancel()
+        screen.synchronize()
+
+        surface.scroll_to_row(example.intervals[0].physical_row)
+        region = surface.scrollable_content_region
+        screen.open_menu(file, anchor=(region.x + 50, region.y + 1))
+        assert screen.action_menu.is_open
+        geometry = screen.action_menu.geometry
+        assert geometry is not None
+        nav_x, nav_y = _tutorial_cell(surface, next_link)
+        assert not geometry.rect.contains(region.x + nav_x, region.y + nav_y)
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, nav_x, nav_y))
+        assert screen.action_menu.is_open
+        assert documentation.sentence == (
+            "TUTORIAL NEXT “2. Colon commands” • Left: open • Right: no menu"
+        )
+        before = listener.history.rows
+        _tutorial_click(surface, next_link)
+        assert not screen.action_menu.is_open
+        assert listener.history.rows != before
+        assert _tutorial_presentation(listener, "card").value.title == "2. Colon commands"
+
+        surface.scroll_to_row(example.intervals[0].physical_row)
+        screen.open_menu(file, anchor=(region.x + 50, region.y + 1))
+        assert screen.action_menu.is_open
+        before = listener.history.rows
+        _tutorial_click(surface, next_link)
+        assert not screen.action_menu.is_open
+        assert listener.history.rows != before
+
+        surface.scroll_to_row(example.intervals[0].physical_row)
+        screen.open_menu(file, anchor=(region.x + 50, region.y + 1))
+        assert screen.action_menu.is_open
+        try_x, try_y = _tutorial_cell(surface, example)
+        assert not screen.action_menu.geometry.rect.contains(region.x + try_x, region.y + try_y)
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, try_x, try_y))
+        assert screen.action_menu.is_open
+        assert documentation.sentence.startswith("TUTORIAL TRY • Left: finish or cancel")
+        before = listener.history.rows
+        _tutorial_click(surface, example)
+        assert not screen.action_menu.is_open
+        assert listener.input_text == ""
+        assert listener.history.rows == before
+
+        screen.open_menu(file, anchor=(region.x + 50, region.y + 1))
+        assert screen.action_menu.is_open
+        border_x = screen.action_menu.geometry.rect.x - region.x
+        border_y = screen.action_menu.geometry.rect.y - region.y
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, border_x, border_y))
+        assert documentation.sentence == "NO TARGET • Click an item • Esc: close menu • Ctrl-G: close menu"
+        before = listener.history.rows
+        surface.on_click(_mouse_event(events.Click, surface, border_x, border_y, button=1))
+        assert listener.history.rows == before
+        assert screen.action_menu.is_open
+        screen.close_menu()
+
+
+@pytest.mark.asyncio
+async def test_input_mode_rule_cwd_shortening_and_fixed_anchor(tmp_path):
+    (tmp_path / "file").write_text("payload")
+    listener = make_listener(tmp_path)
+    listener.submit(":ls")
+    listing = first_listing(listener)
+    file_target = next(
+        presentation for presentation in listing.member_presentations
+        if type(presentation.value) is FileRef
+    )
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(160, 10)) as pilot:
+        screen = app.screen
+        editor = screen.command_input
+        assert editor.region.height == 2
+        assert editor.content_size.height == 1
+        assert editor.styles.border_top[0] == "solid"
+        assert editor.render_line(0).text.startswith(f"PYTHON │ pbui:{tmp_path}> ")
+        assert any(
+            span.start == 0 and span.end == len("PYTHON") and span.style.bold
+            for span in editor.renderable.spans
+        )
+
+        _open_menu_for(screen, file_target)
+        assert screen.action_menu.is_open
+        assert editor.render_line(0).text.startswith("PYTHON │ ")
+        screen.close_menu()
+
+        listener.set_input_text("x" * 120)
+        editor.cursor_position = len(listener.input_text)
+        screen.synchronize()
+        assert editor.render_line(0).text.startswith(f"PYTHON │ pbui:{tmp_path}> ")
+        await pilot.resize_terminal(48, 10)
+        narrow = editor.render_line(0).text
+        assert narrow.startswith("PYTHON │ pbui:…")
+        assert str(tmp_path)[-8:] in narrow
+        assert "> " in narrow
+        assert narrow.rstrip().endswith("x")
+        assert listener.cwd == str(tmp_path)
+        assert listener.input_text == "x" * 120
+        assert editor.cursor_position == 120
+
+        await pilot.resize_terminal(6, 10)
+        assert editor.render_line(0).text == "PYTHON"
+
+
+@pytest.mark.asyncio
+async def test_input_mode_transitions_in_screen(tmp_path):
+    listener = make_listener(tmp_path)
+    app = PbuiApp(listener)
+    async with app.run_test(size=(100, 10)) as pilot:
+        editor = app.screen.command_input
+        row = editor.render_line(0)
+        assert row.text.startswith(f"PYTHON │ pbui:{tmp_path}> ")
+        assert row._segments[0].text == "PYTHON"
+        assert row._segments[0].style.bold
+        assert not row._segments[1].style.bold
+
+        await pilot.press(*_key_names(":rm"))
+        assert editor.render_line(0).text.startswith(f"COMMAND │ pbui:{tmp_path}> :rm")
+        await pilot.press("enter")
+        assert editor.render_line(0).text.startswith(
+            f"SELECT FILE FOR rm │ pbui:{tmp_path}> "
+        )
+        await pilot.press("escape")
+        assert editor.render_line(0).text.startswith(f"PYTHON │ pbui:{tmp_path}> ")
+
+
+@pytest.mark.asyncio
+async def test_bottom_documentation_hand_check_sequence(tmp_path):
+    (tmp_path / "sample-file").write_text("sample")
+    listener = make_listener(tmp_path)
+    listener.submit(":ls")
+    listing = first_listing(listener)
+    file = next(
+        item for item in listing.member_presentations
+        if item.presentation_type is listener.types.file
+    )
+    app = PbuiApp(listener)
+    async with app.run_test(size=(140, 12)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        line = screen.documentation_line
+        assert screen.command_input.mode == "PYTHON"
+        assert line.sentence == "NO TARGET"
+        interval = file.intervals[0]
+        surface.scroll_to_row(interval.physical_row)
+        surface.on_mouse_move(_mouse_event(
+            events.MouseMove, surface, interval.start_column,
+            interval.physical_row - int(surface.scroll_y),
+        ))
+        assert line.sentence == (
+            "FILE “sample-file” • Left: show • Right: menu"
+        )
+        assert line.render().plain == line.sentence
+        await pilot.press(*_key_names(":rm"), "enter")
+        assert screen.command_input.mode == "SELECT FILE FOR rm"
+        assert line.sentence == (
+            "SELECTING FILE FOR rm — FILE “sample-file”"
+            " • Left: use and run command • Right: no menu"
+            " • Esc: cancel • Ctrl-G: cancel"
+        )
+        await pilot.press("escape")
+        assert screen.command_input.mode == "PYTHON"
+        assert line.sentence == "NO TARGET"

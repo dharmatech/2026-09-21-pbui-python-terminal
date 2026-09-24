@@ -79,8 +79,11 @@ def test_registers_exact_domain_types_in_order_and_by_identity():
         "PythonInput",
         "CommandInput",
         "MenuActionInput",
+        "TutorialCard",
+        "TutorialTarget",
+        "TutorialTry",
     ]
-    assert len({id(entry) for entry in registry}) == 11
+    assert len({id(entry) for entry in registry}) == 14
     assert types.file is registry.lookup("File")
     assert types.directory is registry.lookup("Directory")
     assert types.process is registry.lookup("Process")

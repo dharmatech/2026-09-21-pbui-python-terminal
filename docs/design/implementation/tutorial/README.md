@@ -6,11 +6,10 @@ Next, Back, Contents, and Try are presentations on the card.
 | Artifact | Path |
 |---|---|
 | Charter | [`charter.md`](charter.md) |
-| Spec | `spec.md` (designer writes this; not started) |
-| Checkpoints | `checkpoints/` (one at a time, after the spec) |
+| Spec | [`spec.md`](spec.md) (accepted and implemented) |
+| Checkpoints | [`checkpoints/000-cards-and-links.md`](checkpoints/000-cards-and-links.md) and [`checkpoints/001-screen.md`](checkpoints/001-screen.md) (implemented) |
 
-**Status.** Charter written, waiting for review. No spec, no
-checkpoints.
+**Status.** Tutorial is complete through checkpoint 001. The implementer reported `uv sync`, 304 passing tests with `uv run pytest`, and a successful live `uv run pbui` tour.
 
 The program lives at the project root
 (`/home/dharmatech/journal/2026-09-21-pbui-python-terminal/`).

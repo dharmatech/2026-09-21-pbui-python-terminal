@@ -186,6 +186,9 @@ def test_composition_is_coherent_bounded_and_never_changes_process_cwd(tmp_path)
         "PythonInput",
         "CommandInput",
         "MenuActionInput",
+        "TutorialCard",
+        "TutorialTarget",
+        "TutorialTry",
     ]
     assert listener.command_names == (
         "ls",
@@ -199,6 +202,7 @@ def test_composition_is_coherent_bounded_and_never_changes_process_cwd(tmp_path)
         "only",
         "widen",
         "get",
+        "tutorial",
     )
     assert listener.filesystem.allowed_root == str(tmp_path)
     assert listener.processes is processes
