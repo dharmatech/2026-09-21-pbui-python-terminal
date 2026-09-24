@@ -110,7 +110,7 @@ def test_documentation_target_kinds_and_saved_values(tmp_path):
         (types.text, "text", "TEXT • Left: no action • Right: no menu"),
         (types.error, "error", "ERROR • Left: no action • Right: no menu"),
     )
-    assert format_documentation(listener, None) == "NO TARGET"
+    assert format_documentation(listener, None) == "READY"
     for index, (presentation_type, value, expected) in enumerate(cases):
         presentation = Presentation(10000 + index, presentation_type, value)
         assert format_documentation(listener, presentation) == expected
@@ -206,6 +206,7 @@ def test_substring_continuation_and_tutorial_selection_documentation(tmp_path):
         "NO TARGET • Python continuation: enter another line • Esc: discard • Ctrl-G: discard"
     )
     listener.cancel()
+    assert format_documentation(listener, None) == "READY"
     listener.submit(":tutorial")
     navigation = next(
         p for p in listener.history.presentations

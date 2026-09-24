@@ -7,7 +7,7 @@ import sympy
 from pbui.chips import PythonChip
 from pbui.commands import HeadlessListener, RootedFilesystem
 from pbui.repl import ValueTranslator
-from pbui.text import display_width, layout
+from pbui.text import display_width, layout, stored_row_text
 
 
 class EmptyProcesses:
@@ -25,9 +25,9 @@ def listener_at(tmp_path):
 def drawings(listener):
     # These predecessor assertions concern result rows.
     return tuple(
-        row.text for row in layout(listener.history, 10000).rows
-        if not listener.history.rows[row.logical_row].presentations
-        or listener.history.rows[row.logical_row].presentations[0].type not in (
+        stored_row_text(row) for row in listener.history.rows
+        if not row.presentations
+        or row.presentations[0].type not in (
             listener.types.python_input,
             listener.types.command_input,
             listener.types.menu_action_input,

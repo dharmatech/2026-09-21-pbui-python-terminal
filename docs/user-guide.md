@@ -134,6 +134,8 @@ command.
 | Key | Action |
 |---|---|
 | Enter | Submit the current input. |
+| Up | Recall the next older submission from this session. |
+| Down | Move toward newer submissions, then restore unsent input. |
 | `Ctrl-O` | Open the action menu for the presentation under the pointer. |
 | `Ctrl-G` | Clear input and cancel a pending selection, substring prompt, or menu. |
 | Escape | Cancel like `Ctrl-G`; when a menu is open, close the menu first. |

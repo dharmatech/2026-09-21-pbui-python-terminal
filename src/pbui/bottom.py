@@ -230,9 +230,11 @@ def format_documentation(
             left = f"cannot use {type_name}; {required} required"
         return f"{lead} — {_clauses(target, left)}{_CANCEL}"
 
-    if presentation is None or kind is None:
-        if presentation is None and listener.pending_python_source:
+    if presentation is None:
+        if listener.pending_python_source:
             return "NO TARGET • Python continuation: enter another line • Esc: discard • Ctrl-G: discard"
+        return "READY"
+    if kind is None:
         return "NO TARGET"
 
     has_menu = bool(

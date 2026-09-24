@@ -14,7 +14,9 @@ import sympy
 
 from pbui.chips import Piece, splice
 from pbui.domain import escape_display
-from pbui.substrate import Presentation, PresentationHistory, PresentationType
+from pbui.substrate import (
+    Presentation, PresentationHistory, PresentationType, grouped_operation,
+)
 from pbui.text import (
     DrawingContext,
     HistoryRow,
@@ -314,6 +316,7 @@ class PythonEvaluator:
             return None
         return self.display_value(result, include_none=True)
 
+    @grouped_operation
     def show_detail(self, presentation: Presentation) -> bool:
         """Append detail for the exact retained Value, leaving its identity intact."""
 

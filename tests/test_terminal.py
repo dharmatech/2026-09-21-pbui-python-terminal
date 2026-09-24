@@ -41,6 +41,8 @@ from pbui.text import (
     DrawingContext,
     display_width as pure_display_width,
     layout,
+    row_indents,
+    stored_row_text,
     truncate_display as pure_truncate_display,
 )
 
@@ -115,16 +117,21 @@ def _offset_for_logical_column(surface, presentation, logical_column):
     logical_row = surface.current_layout.rows[
         presentation.intervals[0].physical_row
     ].logical_row
+    assert logical_row is not None
+    indent = 2 if surface.current_layout.width >= 3 and row_indents(
+        surface._logical_rows[logical_row]
+    ) else 0
     remaining = logical_column
     for physical_row, rendered_row in enumerate(surface.current_layout.rows):
         if rendered_row.logical_row != logical_row:
             continue
-        if remaining < rendered_row.display_width:
+        content_width = rendered_row.display_width - indent
+        if remaining < content_width:
             return (
-                remaining,
+                remaining + indent,
                 physical_row - int(surface.scroll_y),
             )
-        remaining -= rendered_row.display_width
+        remaining -= content_width
     raise AssertionError(f"logical column {logical_column} is outside the row")
 
 
@@ -140,9 +147,12 @@ def _first_physical_row(surface, logical_row):
 
 
 def _top_logical_row(surface):
-    return surface._logical_rows[
-        surface.current_layout.rows[int(surface.scroll_y)].logical_row
-    ]
+    physical = int(surface.scroll_y)
+    logical = surface.current_layout.rows[physical].logical_row
+    if logical is None:
+        logical = surface.current_layout.rows[physical + 1].logical_row
+    assert logical is not None
+    return surface._logical_rows[logical]
 
 
 def _append_plain_rows(listener, count, *, prefix="after"):
@@ -302,7 +312,8 @@ async def test_empty_app_mounts_exact_fixed_regions(tmp_path):
         assert history.region.height == 9
         assert history.current_layout.rows == ()
         assert history.virtual_size.height == 0
-        assert documentation.sentence == "NO TARGET"
+        assert documentation.sentence == "READY"
+        assert documentation.render().plain == "READY"
 
 
 @pytest.mark.asyncio
@@ -419,13 +430,14 @@ async def test_large_wrapped_process_history_rebuilds_only_hover_rows(
         )
 
         logical_text = {
-            logical_row: "".join(
-                row.text
-                for row in surface.current_layout.rows
-                if row.logical_row == logical_row
-            )
-            for logical_row in range(process_count + 2)
+            logical_row: stored_row_text(row)
+            for logical_row, row in enumerate(listener.history.rows)
         }
+        assert all(
+            rendered.text.startswith("  ")
+            for rendered in surface.current_layout.rows
+            if rendered.logical_row is not None and rendered.logical_row > 0
+        )
         assert logical_text[0] == "› : ps"
         assert logical_text[1] == (
             f"{'pid':>10}  {'state':<10}  {'user':<16}  {'command':<48}"
@@ -662,19 +674,24 @@ def test_directory_colors_and_whole_process_row_styling(tmp_path):
     )
     console = Console()
     assert row.text.endswith("…")
-    assert len(row.text) == 90
-    for column in (0, 9, 10, 11, 21, 22, 23, 39, 40, 41, 42, 89):
+    assert len(row.text) == 92
+    for column in (0, 1):
+        assert current_layout.hit_test(column, physical_row) is None
+    for column in (2, 11, 12, 13, 23, 24, 25, 41, 42, 43, 44, 91):
         assert current_layout.hit_test(column, physical_row) is presentation
     for index in range(len(row.text)):
         style = rich_row.get_style_at_offset(console, index)
-        assert style.color is not None
-        assert style.color.triplet.hex == "#5f87d7"
+        if index < 2:
+            assert style.color is None or style.color.name == "default"
+        else:
+            assert style.color is not None
+            assert style.color.triplet.hex == "#5f87d7"
 
 
 def test_documentation_formatter_covers_normative_table(tmp_path):
     listener = make_listener(tmp_path)
     item = domain_presentations(listener)
-    assert format_documentation(listener, None) == "NO TARGET"
+    assert format_documentation(listener, None) == "READY"
     assert format_documentation(listener, item["File"]) == (
         "FILE “a name” • Left: show • Right: menu"
     )
@@ -1334,7 +1351,7 @@ async def test_hover_and_documentation_rehit_after_view_resize_and_pointer_exit(
         surface.scroll_to_row(_first_physical_row(surface, header))
         first_member = next(row for row in listener.history.rows if row.presentations == (listing.member_presentations[0],))
         y = _first_physical_row(surface, first_member) - int(surface.scroll_y)
-        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, y))
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 2, y))
         assert documentation.sentence == "PROCESS 1 • Left: show • Right: menu"
 
         revision = listener.history.revision
@@ -1350,7 +1367,7 @@ async def test_hover_and_documentation_rehit_after_view_resize_and_pointer_exit(
         assert documentation.sentence == "PROCESS 1 • Left: show • Right: menu"
 
         await pilot.resize_terminal(26, 12)
-        assert surface.hovered_presentation is surface.presentation_at_content_offset(0, y)
+        assert surface.hovered_presentation is surface.presentation_at_content_offset(2, y)
         assert documentation.sentence == format_documentation(
             listener, surface.hovered_presentation, surface.pointer_logical_column
         )
@@ -1360,8 +1377,88 @@ async def test_hover_and_documentation_rehit_after_view_resize_and_pointer_exit(
         await pilot.resize_terminal(26, 6)
         assert surface.pointer_offset is None
         assert surface.hovered_presentation is None
-        assert documentation.sentence == "NO TARGET"
+        assert documentation.sentence == "READY"
         assert listener.history.revision == revision + 4
+
+
+@pytest.mark.asyncio
+async def test_recall_keys_keep_editor_caret_and_history_viewport(tmp_path):
+    (tmp_path / "sample").write_text("data")
+    listener = make_listener(tmp_path)
+    _append_plain_rows(listener, 30, prefix="seed")
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(120, 9)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        editor = screen.command_input
+        await pilot.press(*_key_names(":ls"), "enter")
+        await pilot.press(*_key_names("1+2"), "enter")
+        saved_command = next(
+            item for item in listener.history.presentations
+            if item.type is listener.types.command_input
+        )
+        assert len(listener.recall_entries) == 2
+        await pilot.press(*_key_names("draft"), "left", "left")
+        assert editor.cursor_position == 3
+        surface.scroll_to_row(5)
+        await pilot.pause()
+        scroll = int(surface.scroll_y)
+        anchor = _top_logical_row(surface)
+        input_region = editor.region
+        assert scroll < saved_command.intervals[0].physical_row
+
+        async def check(key, expected, mode, cursor):
+            await pilot.press(key)
+            row = editor.render_line(0).text
+            assert row.startswith(f"{mode} │ ")
+            assert expected in row
+            assert listener.input_text == expected
+            assert editor.cursor_position == cursor
+            cursor_index = editor._cursor_index(editor.display_text)
+            assert any(
+                span.style.reverse and span.start == cursor_index
+                for span in editor.renderable.spans
+            )
+            assert editor.has_focus
+            assert editor.region == input_region
+            assert int(surface.scroll_y) == scroll
+            assert _top_logical_row(surface) is anchor
+
+        await check("up", "1+2", "PYTHON", 3)
+        await check("up", ":ls", "COMMAND", 3)
+        await check("down", "1+2", "PYTHON", 3)
+        await check("down", "draft", "PYTHON", 3)
+
+        surface.post_message(_mouse_event(events.MouseScrollDown, surface, 0, 0))
+        await pilot.pause()
+        assert int(surface.scroll_y) == scroll + 3
+        assert editor.region == input_region
+        assert "draft" in editor.render_line(0).text
+        await pilot.press("up", "down")
+        assert int(surface.scroll_y) == scroll + 3
+        assert editor.cursor_position == 3
+
+        await pilot.press("ctrl+g", *_key_names(":draft"), "left", "left")
+        assert listener.command_cursor == 4
+        await pilot.press("up", "down")
+        assert listener.input_text == ":draft"
+        assert listener.command_cursor == 4
+        assert editor.cursor_position == 4
+        assert ":draft" in editor.render_line(0).text
+        assert int(surface.scroll_y) == scroll + 3
+
+        _open_menu_for(screen, saved_command)
+        await pilot.pause()
+        assert screen.action_menu.is_open
+        menu_scroll = int(surface.scroll_y)
+        menu_row = editor.render_line(0).text
+        await pilot.press("up", "down")
+        assert screen.action_menu.is_open
+        assert editor.render_line(0).text == menu_row
+        assert listener.input_text == ":draft"
+        assert editor.cursor_position == 4
+        assert int(surface.scroll_y) == menu_scroll
 
 
 @pytest.mark.asyncio
@@ -1676,9 +1773,13 @@ async def test_coordinates_hover_click_selection_and_literal_misses(tmp_path, mo
         move = _mouse_event(events.MouseMove, surface, x, y)
         assert surface.content_offset_from_event(move) == Offset(x, y)
         assert surface.presentation_at_content_offset(x, y) is target_presentation
-        assert surface.presentation_at_content_offset(0, y) is target_presentation
+        assert surface.presentation_at_content_offset(0, y) is None
+        assert surface.presentation_at_content_offset(1, y) is None
         literal_x = surface.current_layout.rows[interval.physical_row].display_width + 1
         assert surface.presentation_at_content_offset(literal_x, y) is None
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, literal_x, y))
+        assert app.screen.documentation_line.sentence == "READY"
+        assert app.screen.documentation_line.render().plain == "READY"
 
         assert app.screen.command_input.has_focus
         assert not surface.can_focus
@@ -1692,9 +1793,7 @@ async def test_coordinates_hover_click_selection_and_literal_misses(tmp_path, mo
         )
         surface.on_leave(events.Leave(surface))
         assert surface.hovered_presentation is None
-        assert app.screen.documentation_line.sentence == (
-            "NO TARGET"
-        )
+        assert app.screen.documentation_line.sentence == "READY"
 
         calls = []
 
@@ -2201,15 +2300,15 @@ async def test_action_menu_open_close_and_view_keep_wrapped_viewport_anchor(tmp_
         surface.scroll_to_row(first + 1)
         assert _top_logical_row(surface) is member_row
         assert int(surface.scroll_y) == first + 1
-        hit = surface.presentation_at_content_offset(0, 0)
+        hit = surface.presentation_at_content_offset(2, 0)
         assert hit is member
-        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, 0))
-        surface.on_click(_mouse_event(events.Click, surface, 0, 0, button=3))
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 2, 0))
+        surface.on_click(_mouse_event(events.Click, surface, 2, 0, button=3))
         await pilot.pause()
         assert screen.action_menu.target is member
         assert _top_logical_row(surface) is member_row
         assert int(surface.scroll_y) == first + 1
-        assert surface.hovered_presentation is surface.presentation_at_content_offset(0, 0)
+        assert surface.hovered_presentation is surface.presentation_at_content_offset(2, 0)
         _move_menu_index(screen.action_menu, 0)
         surface.on_leave(events.Leave(surface))
         await pilot.press("ctrl+g")
@@ -2409,8 +2508,8 @@ async def test_repl_value_wrapped_hit_click_hover_accept_and_history_order(tmp_p
         surface.scroll_to_row(value.intervals[1].physical_row)
         interval = value.intervals[1]
         y = interval.physical_row - int(surface.scroll_y)
-        assert surface.presentation_at_content_offset(0, y) is value
-        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, y))
+        assert surface.presentation_at_content_offset(2, y) is value
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 2, y))
         assert screen.documentation_line.sentence == (
             "PYTHON VALUE • Left: show • Right: no menu"
         )
@@ -2422,7 +2521,7 @@ async def test_repl_value_wrapped_hit_click_hover_accept_and_history_order(tmp_p
         screen.synchronize()
         listener.set_input_text("")
         screen.synchronize()
-        surface.on_click(_mouse_event(events.Click, surface, 0, y, button=1))
+        surface.on_click(_mouse_event(events.Click, surface, 2, y, button=1))
         assert listener.input_text == ""
         assert listener.history.presentations[-1].type is listener.types.text
         assert listener.history.presentations[-1].value.startswith("list: [")
@@ -2431,13 +2530,13 @@ async def test_repl_value_wrapped_hit_click_hover_accept_and_history_order(tmp_p
         screen.synchronize()
         surface.scroll_to_row(value.intervals[1].physical_row)
         y = value.intervals[1].physical_row - int(surface.scroll_y)
-        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, y))
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 2, y))
         assert screen.documentation_line.sentence == (
             "SELECTING FILE FOR rm — PYTHON VALUE • Left: cannot use Value; File required • Right: no menu • Esc: cancel • Ctrl-G: cancel"
         )
         assert presentation_style(listener, value, value).dim
         before = listener.history.rows
-        surface.on_click(_mouse_event(events.Click, surface, 0, y, button=1))
+        surface.on_click(_mouse_event(events.Click, surface, 2, y, button=1))
         assert listener.history.rows == before
         assert listener.chip is None and listener.pending_request is not None
         await pilot.press("escape")
@@ -2446,7 +2545,7 @@ async def test_repl_value_wrapped_hit_click_hover_accept_and_history_order(tmp_p
         surface.scroll_to_row(value.intervals[-1].physical_row)
         interval = value.intervals[-1]
         y = interval.physical_row - int(surface.scroll_y)
-        assert surface.presentation_at_content_offset(0, y) is value
+        assert surface.presentation_at_content_offset(2, y) is value
         assert screen.documentation_line.region.height == 1
         assert display_width(screen.documentation_line.render().plain) <= screen.documentation_line.content_size.width
 
@@ -2797,7 +2896,8 @@ async def test_transcript_screen_click_loads_then_enter_records_new_rows(tmp_pat
     async with app.run_test(size=(60, 10)) as pilot:
         screen = app.screen
         assert screen.history_surface.current_layout.rows[0].text == "› 1 + 2 + 3"
-        assert screen.history_surface.current_layout.rows[2].text == "› :ls"
+        assert screen.history_surface.current_layout.rows[2].text == ""
+        assert screen.history_surface.current_layout.rows[3].text == "› :ls"
         revision = listener.history.revision
         _click_history_presentation(screen, python)
         assert listener.input_text == "1 + 2 + 3"
@@ -3035,7 +3135,7 @@ async def test_transcript_documentation_recomputes_at_stationary_pointer(tmp_pat
         assert listener.history.revision == revision
         assert screen.documentation_line.sentence.startswith("SELECTING FILE FOR rm — PYTHON INPUT • Left: cannot use PythonInput;")
         await pilot.press("ctrl+g")
-        assert format_documentation(listener, None) == "NO TARGET"
+        assert format_documentation(listener, None) == "READY"
 
 
 @pytest.mark.asyncio
@@ -3326,7 +3426,7 @@ async def test_popup_clamping_hover_border_clicks_and_outside_routing(tmp_path):
         assert menu.is_open
         before = listener.history.revision
         assert not menu.geometry.rect.contains(region.x, region.y + y)
-        assert surface.presentation_at_content_offset(0, y) is file
+        assert surface.presentation_at_content_offset(0, y) is None
         surface.on_click(_mouse_event(events.Click, surface, 0, y, button=1))
         assert not menu.is_open
         assert listener.history.revision == before
@@ -3486,7 +3586,7 @@ async def test_http_screen_menus_json_dig_and_wrapped_member_hits(tmp_path):
         assert root.value is listener.python_namespace['_']
         assert root_row is listener.history.rows[-1]
         assert root_row.presentations == (root,)
-        assert surface.current_layout.rows[-1].text == '▸ JsonObject (1 keys)'
+        assert surface.current_layout.rows[-1].text == '  ▸ JsonObject (1 keys)'
         _click_history_presentation(screen, root, button=3)
         assert not screen.action_menu.is_open
         _click_history_presentation(screen, root)
@@ -3687,7 +3787,7 @@ async def test_http_screen_literal_trailer_is_inert(tmp_path):
         y = physical - int(surface.scroll_y)
         assert surface.presentation_at_content_offset(0, y) is None
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 0, y))
-        assert screen.documentation_line.sentence == 'NO TARGET'
+        assert screen.documentation_line.sentence == 'READY'
         revision = listener.history.revision
         surface.on_click(_mouse_event(events.Click, surface, 0, y, button=1))
         surface.on_click(_mouse_event(events.Click, surface, 0, y, button=3))
@@ -3732,6 +3832,116 @@ def _tutorial_hover(surface, presentation):
 
 
 @pytest.mark.asyncio
+async def test_history_tour_screen_gaps_indent_hits_and_hover(tmp_path, monkeypatch):
+    (tmp_path / "sample").write_text("data")
+    listener = make_listener(tmp_path)
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(120, 20)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        listener.submit(":tutorial")
+        screen.synchronize()
+        first_try = _tutorial_presentation(listener, "try")
+        first_next = _tutorial_presentation(listener, "target", direction="Next")
+        _tutorial_click(surface, first_try)
+        assert listener.input_text == "1 + 2 + 3"
+        await pilot.press("enter")
+        value = next(
+            item for item in listener.history.presentations
+            if item.type is listener.types.value and item.value == 6
+        )
+        _tutorial_click(surface, first_next)
+        second_try = _tutorial_presentation(listener, "try")
+        second_next = _tutorial_presentation(listener, "target", direction="Next")
+        _tutorial_click(surface, second_try)
+        assert listener.input_text == ":ls"
+        await pilot.press("enter")
+        file = next(
+            item for item in listener.history.presentations
+            if item.type is listener.types.file
+        )
+        _tutorial_click(surface, second_next)
+        picture = surface.current_layout
+        assert picture.rows[0].text == "› :tutorial"
+        value_y = next(i for i, row in enumerate(picture.rows) if row.text == "  int 6")
+        file_y = next(
+            i for i, row in enumerate(picture.rows)
+            if row.text.startswith("  sample")
+        )
+        assert picture.rows[value_y + 1].text == ""
+        assert picture.rows[value_y + 1].logical_row is None
+        assert picture.rows[value_y + 2].text.startswith("  2. Colon commands")
+        assert picture.rows[file_y + 1].text == ""
+        assert picture.rows[file_y + 1].logical_row is None
+        assert picture.rows[file_y + 2].text.startswith("  3. Reuse a value")
+        assert picture.hit_test(0, file_y) is None
+        assert picture.hit_test(1, file_y) is None
+        assert picture.hit_test(2, file_y) is file
+        assert picture.hit_test(2, value_y + 1) is None
+        try_interval = first_try.intervals[0]
+        assert picture.hit_test(
+            try_interval.start_column, try_interval.physical_row
+        ) is first_try
+        assert picture.hit_test(0, try_interval.physical_row) is None
+        assert picture.hit_test(1, try_interval.physical_row) is None
+
+        gap = value_y + 1
+        surface.scroll_to_row(file_y)
+        file_view_y = file_y - int(surface.scroll_y)
+        for indent_x in (0, 1):
+            surface.on_mouse_move(_mouse_event(
+                events.MouseMove, surface, indent_x, file_view_y
+            ))
+            assert surface.pointer_logical_column is None
+        surface.on_mouse_move(_mouse_event(
+            events.MouseMove, surface, 2, file_view_y
+        ))
+        assert surface.pointer_logical_column == 0
+        surface.scroll_to_row(gap)
+        assert int(surface.scroll_y) == gap
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, 2, 0))
+        assert surface.pointer_logical_column is None
+        surface.synchronize(force=True)
+        assert int(surface.scroll_y) == gap + 1
+        assert _top_logical_row(surface) is listener.history.rows[
+            picture.rows[gap + 1].logical_row
+        ]
+
+        surface.set_hovered_presentation(None)
+        built = []
+        original_builder = terminal_module.build_history_row_text
+
+        def record_row(*args, **kwargs):
+            built.append(args[2])
+            return original_builder(*args, **kwargs)
+
+        monkeypatch.setattr(terminal_module, "build_history_row_text", record_row)
+        surface.set_hovered_presentation(file)
+        assert built
+        assert file_y in built
+        assert all(surface.current_layout.rows[y].logical_row is not None for y in built)
+        assert file_y + 1 not in built
+
+        surface.set_hovered_presentation(None)
+        before = len(listener.history.rows)
+        _click_history_presentation(screen, file)
+        assert len(listener.history.rows) == before + 1
+        detail_rows = [
+            row for row in surface.current_layout.rows
+            if row.logical_row == len(listener.history.rows) - 1
+        ]
+        assert detail_rows[0].text.startswith("  path: ")
+        assert all(row.text.startswith("  ") for row in detail_rows)
+        before = len(listener.history.rows)
+        _click_history_presentation(screen, value)
+        assert len(listener.history.rows) > before
+        assert surface.current_layout.rows[-1].text.startswith("  ")
+        _tutorial_click(surface, first_try)
+        assert listener.input_text == "1 + 2 + 3"
+
+
+@pytest.mark.asyncio
 async def test_tutorial_card_screen_hits_styles_wrapping_scroll_and_menus(tmp_path):
     listener = make_listener(tmp_path)
     listener.submit(":tutorial")
@@ -3763,7 +3973,8 @@ async def test_tutorial_card_screen_hits_styles_wrapping_scroll_and_menus(tmp_pa
             ]
             if not any(item in row.presentations for item in (example, back, next_link, up)):
                 for physical in segments:
-                    assert surface.current_layout.hit_test(0, physical) is card
+                    assert surface.current_layout.hit_test(0, physical) is None
+                    assert surface.current_layout.hit_test(2, physical) is card
 
         for control in (back, next_link, up, example):
             assert control.intervals
@@ -3812,7 +4023,7 @@ async def test_tutorial_card_screen_hits_styles_wrapping_scroll_and_menus(tmp_pa
 
         example_row = next(row for row in rows if example in row.presentations)
         first = _first_physical_row(surface, example_row)
-        assert surface.current_layout.hit_test(6, first) is card
+        assert surface.current_layout.hit_test(8, first) is card
         await pilot.resize_terminal(16, 8)
         await pilot.pause()
         assert len(example.intervals) >= 1
@@ -4169,7 +4380,7 @@ async def test_bottom_documentation_hand_check_sequence(tmp_path):
         surface = screen.history_surface
         line = screen.documentation_line
         assert screen.command_input.mode == "PYTHON"
-        assert line.sentence == "NO TARGET"
+        assert line.sentence == "READY"
         interval = file.intervals[0]
         surface.scroll_to_row(interval.physical_row)
         surface.on_mouse_move(_mouse_event(
@@ -4189,4 +4400,4 @@ async def test_bottom_documentation_hand_check_sequence(tmp_path):
         )
         await pilot.press("escape")
         assert screen.command_input.mode == "PYTHON"
-        assert line.sentence == "NO TARGET"
+        assert line.sentence == "READY"

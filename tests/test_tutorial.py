@@ -11,7 +11,7 @@ import pytest
 
 from pbui.commands import HeadlessListener, RootedFilesystem
 from pbui.domain import escape_display
-from pbui.text import layout
+from pbui.text import layout, stored_row_text
 from pbui.transcript import CommandInput, PythonInput
 from pbui.tutorial import (
     TutorialCard,
@@ -43,7 +43,7 @@ def make_listener(tmp_path):
 
 
 def text_rows(listener):
-    return tuple(row.text for row in layout(listener.history, 200).rows)
+    return tuple(stored_row_text(row) for row in listener.history.rows)
 
 
 def card_rows(listener, outer):
@@ -177,10 +177,10 @@ def test_command_records_then_appends_fresh_card_without_replacing_history(tmp_p
     assert first.value is listener.tutorial_stack.tour[0]
     assert len(card_rows(listener, first)) == 7
     assert tuple(row.text for row in layout(listener.history, 200).rows)[-7:] == (
-        "1. Presentations",
-        *listener.tutorial_stack.tour[0].body,
-        "[Try] 1 + 2 + 3",
-        "[Back]  [Next]  [Up: Contents]",
+        "  1. Presentations",
+        *(f"  {line}" for line in listener.tutorial_stack.tour[0].body),
+        "  [Try] 1 + 2 + 3",
+        "  [Back]  [Next]  [Up: Contents]",
     )
     assert all(row.presentations[0] is first for row in card_rows(listener, first))
     before = listener.history.rows
@@ -211,12 +211,13 @@ def test_nested_hits_navigation_and_disabled_boundaries(tmp_path):
 
     drawing = layout(listener.history, 80)
     assert drawing.hit_test(0, 0).type is listener.types.command_input
-    first_title_y = next(i for i, row in enumerate(drawing.rows) if row.text == first.value.title)
-    assert drawing.hit_test(0, first_title_y) is first
-    nav_y = next(i for i, row in enumerate(drawing.rows) if row.text.startswith("[Back]"))
-    assert drawing.hit_test(1, nav_y) is back
-    assert drawing.hit_test(6, nav_y) is first
-    assert drawing.hit_test(9, nav_y) is control(listener, first, "Next")
+    first_title_y = next(i for i, row in enumerate(drawing.rows) if row.text == "  " + first.value.title)
+    assert drawing.hit_test(0, first_title_y) is None
+    assert drawing.hit_test(2, first_title_y) is first
+    nav_y = next(i for i, row in enumerate(drawing.rows) if row.text.startswith("  [Back]"))
+    assert drawing.hit_test(3, nav_y) is back
+    assert drawing.hit_test(8, nav_y) is first
+    assert drawing.hit_test(11, nav_y) is control(listener, first, "Next")
 
     count = len(transcript(listener))
     assert listener.select_for_input(control(listener, first, "Next"))

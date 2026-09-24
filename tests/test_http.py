@@ -12,7 +12,7 @@ from pbui.http import (
     MAX_BODY_BYTES, BodyTooLarge, GetRequest, GetResult, GetTransportError,
     HttpResponse, JsonArray, JsonObject, production_get,
 )
-from pbui.text import display_width, layout
+from pbui.text import display_width, layout, stored_row_text
 from pbui.transcript import CommandInput, MenuActionInput
 
 
@@ -46,7 +46,7 @@ def records(listener):
 
 
 def rows(listener):
-    return tuple(row.text for row in layout(listener.history, 10_000).rows)
+    return tuple(stored_row_text(row) for row in listener.history.rows)
 
 
 def actions(listener, presentation):
@@ -403,10 +403,14 @@ def test_json_member_escaping_caps_and_wrapped_single_hit_target(tmp_path):
     logical_index = len(listener.history.rows) - 2
     for y, row in enumerate(rendered.rows):
         if row.logical_row == logical_index:
-            for x in range(row.display_width):
+            for x in range(2, row.display_width):
                 assert rendered.hit_test(x, y) is first.presentations[0]
+            assert rendered.hit_test(0, y) is None
+            assert rendered.hit_test(1, y) is None
     logical_index += 1
     for y, row in enumerate(rendered.rows):
         if row.logical_row == logical_index:
-            for x in range(row.display_width):
+            for x in range(2, row.display_width):
                 assert rendered.hit_test(x, y) is second.presentations[0]
+            assert rendered.hit_test(0, y) is None
+            assert rendered.hit_test(1, y) is None

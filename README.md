@@ -29,13 +29,20 @@ it, its environment, and its dependencies with uv only.
 | [`sympy`](docs/design/implementation/sympy/README.md) | Pretty SymPy expressions and simplify, expand, factor | Implemented through sympy 000 |
 | [`transcript`](docs/design/implementation/transcript/README.md) | Record input in the history and bring it back | Implemented through transcript 001 |
 | [`popup`](docs/design/implementation/popup/README.md) | Menu beside the pointer, and a button documentation line | Implemented through popup 000 |
-| [`http`](docs/design/implementation/http/README.md) | GET requests, responses, and clickable JSON | Charter written, waiting for review |
-| [`tutorial`](docs/design/implementation/tutorial/README.md) | A short tour of cards inside the listener | Charter written, waiting for review |
-| [`bottom`](docs/design/implementation/bottom/README.md) | Mode on the input row, and a clearer documentation line | Charter written, waiting for review |
+| [`http`](docs/design/implementation/http/README.md) | GET requests, responses, and clickable JSON | Implemented through http 001 |
+| [`tutorial`](docs/design/implementation/tutorial/README.md) | A short tour of cards inside the listener | Implemented through tutorial 001 |
+| [`bottom`](docs/design/implementation/bottom/README.md) | Mode on the input row, and a clearer documentation line | Implemented through bottom 002; bottom 003 ready to implement |
+| [`history`](docs/design/implementation/history/README.md) | Blank lines between operations, and results indented under `›` | Specification drafted, waiting for review |
+| [`recall`](docs/design/implementation/recall/README.md) | Up and Down bring earlier submissions back into the input row | Charter written; specification not started |
 
 A new discussion should read [`AGENTS.md`](AGENTS.md). The listener,
-listings, REPL, chips, SymPy, transcript, and popup specifications are
-the law for the program as it stands. The HTTP, tutorial, and bottom
-charters are separate explorations. The
+listings, REPL, chips, SymPy, transcript, popup, HTTP, and tutorial
+specifications are the law for the program as it stands. Bottom is
+implemented through bottom 002. The
+[`history`](docs/design/implementation/history/README.md) specification
+is drafted and waiting for review. The
+[`recall`](docs/design/implementation/recall/README.md) charter is the
+assignment for Up and Down. It is not law until its specification is
+accepted. The
 [`transcript demo`](docs/design/implementation/transcript/demo.md) offers
 examples to try.

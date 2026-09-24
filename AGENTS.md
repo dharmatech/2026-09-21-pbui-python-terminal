@@ -60,18 +60,15 @@ program with a Lisp machine or a CLIM port.
   not the goal.
 
 For implementation of the program as it stands, the accepted
-specifications are `docs/design/implementation/listener/spec.md`,
-`docs/design/implementation/listings/spec.md`,
-`docs/design/implementation/repl/spec.md`,
-`docs/design/implementation/chips/spec.md`, and
-`docs/design/implementation/sympy/spec.md`. Their charters are the
-original assignments, not the current law. The popup menu is implemented. Three explorations are open, and they
-are separate. `docs/design/implementation/http/charter.md` is a GET
-request, its response, and clickable JSON.
-`docs/design/implementation/tutorial/charter.md` is a short local tour
-of cards inside the listener. `docs/design/implementation/bottom/charter.md`
-is the input-row mode and the documentation-line shape. History
-markers are not part of that charter. Until each specification is
-accepted, that work is discussion, not implementation. Implementers
-follow one approved checkpoint. The checkpoint repeats the `uv`
-commands for the slice it covers.
+specifications under `docs/design/implementation/` are the law:
+listener, listings, repl, chips, sympy, transcript, popup, http, and
+tutorial. Their charters are the original assignments, not the
+current law. Bottom is accepted and implemented through bottom 002.
+`docs/design/implementation/bottom/checkpoints/003-remove-no-target-wording.md`
+is ready to implement and is not part of the history work.
+`docs/design/implementation/history/charter.md` is the open
+exploration: a blank line between history operations, and a
+two-column indent on every row that is not transcript input. Until
+that specification is accepted, that work is discussion, not
+implementation. Implementers follow one approved checkpoint. The
+checkpoint repeats the `uv` commands for the slice it covers.

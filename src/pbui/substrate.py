@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 if TYPE_CHECKING:
@@ -118,6 +120,9 @@ class PresentationHistory:
         self._presentations: dict[int, Presentation] = {}
         self._reference_counts: dict[int, int] = {}
         self._revision = 0
+        self._next_group_id = 1
+        self._open_group_id: int | None = None
+        self._operation_depth = 0
 
     @property
     def rows(self) -> tuple[HistoryRow, ...]:
@@ -136,6 +141,31 @@ class PresentationHistory:
     def __len__(self) -> int:
         return len(self._rows)
 
+    def _open_group(self) -> None:
+        if self._open_group_id is not None:
+            raise RuntimeError("a history group is already open")
+        self._open_group_id = self._next_group_id
+        self._next_group_id += 1
+
+    def _close_group(self) -> None:
+        if self._open_group_id is None:
+            raise RuntimeError("no history group is open")
+        self._open_group_id = None
+
+    @contextmanager
+    def operation(self) -> Iterator[None]:
+        """Give nested calls one history group, closing it on every exit."""
+
+        if self._operation_depth == 0:
+            self._open_group()
+        self._operation_depth += 1
+        try:
+            yield
+        finally:
+            self._operation_depth -= 1
+            if self._operation_depth == 0:
+                self._close_group()
+
     def append(self, row: HistoryRow) -> None:
         row_presentations = self._validate_row(row)
         self._validate_owner_blocks((*self._rows, row))
@@ -150,6 +180,8 @@ class PresentationHistory:
                 self._reference_counts.get(presentation_id, 0) + 1
             )
 
+        if self._open_group_id is not None:
+            object.__setattr__(row, "group_id", self._open_group_id)
         self._rows.append(row)
         if len(self._rows) > self._max_rows:
             self._discard_oldest()
@@ -171,6 +203,7 @@ class PresentationHistory:
             for key in old_presentations
         ):
             raise ValueError("replacement must keep the same presentations")
+        object.__setattr__(new_row, "group_id", old_row.group_id)
         rows[index] = new_row
         self._rows = deque(rows)
         for presentation in new_row.presentations:
@@ -189,6 +222,9 @@ class PresentationHistory:
 
         retained_rows = tuple(self._rows)
         first, stop = self._find_owner_block(retained_rows, listing_identity)
+        group_id = retained_rows[first].group_id
+        if any(row.group_id != group_id for row in retained_rows[first:stop]):
+            raise ValueError("retained listing rows must share one group id")
         replacements = tuple(replacement_rows)
         if not replacements:
             raise ValueError("replacement rows must not be empty")
@@ -214,6 +250,8 @@ class PresentationHistory:
 
         presentations_to_clear = dict(self._presentations)
         presentations_to_clear.update(candidate_presentations)
+        for row in replacements:
+            object.__setattr__(row, "group_id", group_id)
         self._rows = deque(final_rows)
         self._presentations = final_presentations
         self._reference_counts = final_reference_counts
@@ -314,6 +352,17 @@ class PresentationHistory:
             del self._reference_counts[presentation_id]
             presentation = self._presentations.pop(presentation_id)
             presentation.replace_intervals(())
+
+
+def grouped_operation(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Open a history operation for a listener or evaluator entry point."""
+
+    @wraps(method)
+    def call(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with self._history.operation():
+            return method(self, *args, **kwargs)
+
+    return call
 
 
 @dataclass(frozen=True, slots=True)

@@ -28,7 +28,7 @@ from pbui.domain import (
     format_utc_timestamp,
 )
 from pbui.substrate import Chip
-from pbui.text import layout
+from pbui.text import layout, stored_row_text
 
 
 @dataclass
@@ -71,9 +71,9 @@ def make_listener(tmp_path, processes=None, **kwargs):
 def history_text(listener):
     # These predecessor assertions concern result and listing rows.
     return tuple(
-        row.text for row in layout(listener.history, 10_000).rows
-        if not listener.history.rows[row.logical_row].presentations
-        or listener.history.rows[row.logical_row].presentations[0].type not in (
+        stored_row_text(row) for row in listener.history.rows
+        if not row.presentations
+        or row.presentations[0].type not in (
             listener.types.python_input,
             listener.types.command_input,
             listener.types.menu_action_input,
@@ -288,13 +288,15 @@ def test_ls_lists_current_objects_in_escaped_display_order(tmp_path):
 
     rendered = layout(listener.history, 10_000)
     row = rendered.rows[4]
-    presentation = rendered.hit_test(0, 4)
+    presentation = rendered.hit_test(2, 4)
     assert presentation.value == FileRef(str(tmp_path / "a name"))
+    assert rendered.hit_test(0, 4) is None
+    assert rendered.hit_test(1, 4) is None
     assert all(
         rendered.hit_test(column, 4) is presentation
-        for column in range(row.display_width)
+        for column in range(2, row.display_width)
     )
-    assert row.text.startswith("a name")
+    assert row.text.startswith("  a name")
 
 
 def test_ls_empty_and_expected_failures_leave_listener_usable(tmp_path):
@@ -863,8 +865,10 @@ def test_ls_captures_metadata_and_stable_presentations_once_then_refreshes(tmp_p
         presentation = result_rows(listener)[row_number - 1].presentations[0]
         assert all(
             rendered.hit_test(column, row_number) is presentation
-            for column in range(row.display_width)
-        )
+                for column in range(2, row.display_width)
+            )
+        assert rendered.hit_test(0, row_number) is None
+        assert rendered.hit_test(1, row_number) is None
 
     captured_snapshot = tuple(
         (member.reference, member.displayed_basename, member.size, member.mtime)

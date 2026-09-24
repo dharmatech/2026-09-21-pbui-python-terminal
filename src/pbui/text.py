@@ -125,10 +125,39 @@ class HistoryRow:
     fragments: tuple[Fragment, ...]
     presentations: tuple[Presentation, ...] = field(default_factory=tuple)
     listing_owner: object | None = field(default=None, compare=False)
+    group_id: int | None = field(default=None, compare=False)
 
     @property
     def presentation_ids(self) -> tuple[int, ...]:
         return tuple(_walk_presentation_ids(self.fragments))
+
+
+def is_transcript_input(row: HistoryRow) -> bool:
+    """Whether a stored row contains a transcript input presentation."""
+
+    return any(
+        presentation.type.name in {"PythonInput", "CommandInput", "MenuActionInput"}
+        for presentation in row.presentations
+    )
+
+
+def row_indents(row: HistoryRow) -> bool:
+    """Whether the grouped row will receive a result indent in layout."""
+
+    return row.group_id is not None and not is_transcript_input(row)
+
+
+def stored_row_text(row: HistoryRow) -> str:
+    """Read a logical row's content without physical layout decoration."""
+
+    def text_of(fragments: Iterable[Fragment]) -> str:
+        return "".join(
+            fragment.text if isinstance(fragment, LiteralFragment)
+            else text_of(fragment.children)
+            for fragment in fragments
+        )
+
+    return text_of(row.fragments)
 
 
 def logical_presentation_text(
@@ -139,16 +168,9 @@ def logical_presentation_text(
     if history.get_presentation(presentation.id) is not presentation:
         return None
 
-    def text_of(fragments: Iterable[Fragment]) -> str:
-        return "".join(
-            fragment.text if isinstance(fragment, LiteralFragment)
-            else text_of(fragment.children)
-            for fragment in fragments
-        )
-
     for row in history.rows:
         if presentation in row.presentations:
-            return text_of(row.fragments)
+            return stored_row_text(row)
     return None
 
 
@@ -273,10 +295,10 @@ def present(
 
 @dataclass(frozen=True, slots=True)
 class RenderedRow:
-    """One physical row produced by wrapping one retained logical row."""
+    """One physical row, including optional between-group separators."""
 
     text: str
-    logical_row: int
+    logical_row: int | None
     display_width: int
 
 
@@ -333,10 +355,22 @@ def layout(history: PresentationHistory, width: int) -> Layout:
     physical_row = 0
     draw_order = 0
 
+    previous_group_id: int | None = None
     for logical_row_number, logical_row in enumerate(history.rows):
-        row_chunks: list[list[str]] = [[]]
-        row_widths = [0]
-        column = 0
+        if (
+            previous_group_id is not None
+            and logical_row.group_id is not None
+            and previous_group_id != logical_row.group_id
+        ):
+            rendered_rows.append(RenderedRow("", None, 0))
+            physical_row += 1
+        previous_group_id = logical_row.group_id
+
+        indent = 2 if normalized_width >= 3 and row_indents(logical_row) else 0
+        prefix = " " * indent
+        row_chunks: list[list[str]] = [[prefix]]
+        row_widths = [indent]
+        column = indent
 
         def draw_fragments(
             fragments: Iterable[Fragment], active: tuple[int, ...] = ()
@@ -365,13 +399,13 @@ def layout(history: PresentationHistory, width: int) -> Layout:
                         )
                     if (
                         character_width > 0
-                        and column > 0
+                        and column > indent
                         and character_width > normalized_width - column
                     ):
                         physical_row += 1
-                        row_chunks.append([])
-                        row_widths.append(0)
-                        column = 0
+                        row_chunks.append([prefix])
+                        row_widths.append(indent)
+                        column = indent
 
                     row_chunks[-1].append(character)
                     if character_width == 0:

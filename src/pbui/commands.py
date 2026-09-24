@@ -13,6 +13,7 @@ import pwd
 import signal
 import stat as stat_module
 import sys
+from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Protocol
@@ -53,6 +54,7 @@ from pbui.substrate import (
     PresentationTypeRegistry,
     SubstrateState,
     TranslatorTable,
+    grouped_operation,
 )
 from pbui.chips import Piece, PythonChip, PythonLine, insertion_site_reason
 from pbui.http import (
@@ -350,6 +352,17 @@ def _production_username_lookup(uid: int) -> str:
     return pwd.getpwuid(uid).pw_name
 
 
+@dataclass(frozen=True, slots=True)
+class _RecallDraft:
+    pending_lines: tuple[tuple[Piece, ...], ...]
+    python_pieces: tuple[Piece, ...]
+    python_cursor: int
+    command_text: str
+    command_chip: Chip | None
+    command_chip_loaded: bool
+    command_cursor: int
+
+
 class HeadlessListener:
     """One UI-independent listener model and its complete command layer."""
 
@@ -413,6 +426,10 @@ class HeadlessListener:
             self._contexts.standalone.register_drawer(input_type, lambda value, context: "")
         self._state = SubstrateState()
         self._python_line = PythonLine()
+        self._command_cursor = 0
+        self._recall_entries: deque[PythonInput | CommandInput] = deque(maxlen=400)
+        self._recall_position: int | None = None
+        self._recall_draft: _RecallDraft | None = None
         self._suspended_python: tuple[tuple[tuple[Piece, ...], ...], PythonLine] | None = None
         self._pending_substring_listing: DirectoryListing | ProcessListing | None = None
         self._pending_command_tail: str | None = None
@@ -448,16 +465,30 @@ class HeadlessListener:
             self._translators.register(presentation_type, self._translate_show)
 
     def _record_python(self, lines: tuple[tuple[Piece, ...], ...]) -> Presentation:
-        return append_input(
-            self._history, self._contexts.standalone, PythonInput(lines),
+        value = PythonInput(lines)
+        presentation = append_input(
+            self._history, self._contexts.standalone, value,
             self._types.python_input,
         )
+        self._append_recall(value)
+        return presentation
 
     def _record_command(self, tail: str, chip: Chip | None = None) -> Presentation:
-        return append_input(
-            self._history, self._contexts.standalone, CommandInput(tail, chip),
+        value = CommandInput(tail, chip)
+        presentation = append_input(
+            self._history, self._contexts.standalone, value,
             self._types.command_input,
         )
+        self._append_recall(value)
+        return presentation
+
+    def _append_recall(self, value: PythonInput | CommandInput) -> None:
+        self._recall_entries.append(value)
+        self._reset_recall()
+
+    def _reset_recall(self) -> None:
+        self._recall_position = None
+        self._recall_draft = None
 
     def _action_record(
         self, label: str, operation: Callable[..., object], argument: str | None,
@@ -535,6 +566,77 @@ class HeadlessListener:
     @property
     def input_text(self) -> str:
         return self._state.input_text
+
+    @property
+    def command_cursor(self) -> int:
+        return min(self._command_cursor, len(self._state.input_text))
+
+    def set_command_cursor(self, position: int) -> None:
+        if type(position) is not int or not 0 <= position <= len(self._state.input_text):
+            raise ValueError("cursor is outside the command line")
+        self._command_cursor = position
+
+    @property
+    def recall_entries(self) -> tuple[PythonInput | CommandInput, ...]:
+        return tuple(self._recall_entries)
+
+    @property
+    def recall_position(self) -> int | None:
+        """An oldest-first entry index, or None for the unsent draft."""
+
+        return self._recall_position
+
+    def _capture_recall_draft(self) -> _RecallDraft:
+        return _RecallDraft(
+            self._repl.pending_lines,
+            self._python_line.pieces,
+            self._python_line.cursor,
+            self._state.input_text,
+            self._state.chip,
+            self._command_chip_loaded,
+            self.command_cursor,
+        )
+
+    def _restore_recall_draft(self, draft: _RecallDraft) -> None:
+        self._repl.pending_lines = draft.pending_lines
+        self._python_line = PythonLine(draft.python_pieces, draft.python_cursor)
+        self._state.input_text = draft.command_text
+        self._state.chip = draft.command_chip
+        self._command_chip_loaded = draft.command_chip_loaded
+        self._command_cursor = draft.command_cursor
+
+    def _recall_blocked(self, menu_open: bool) -> bool:
+        return (
+            self.pending_request is not None
+            or self._pending_substring_listing is not None
+            or menu_open
+        )
+
+    def recall_previous(self, *, menu_open: bool = False) -> bool:
+        if self._recall_blocked(menu_open) or not self._recall_entries:
+            return False
+        if self._recall_position is None:
+            self._recall_draft = self._capture_recall_draft()
+            position = len(self._recall_entries) - 1
+        elif self._recall_position == 0:
+            return False
+        else:
+            position = self._recall_position - 1
+        self._load_saved_input(self._recall_entries[position])
+        self._recall_position = position
+        return True
+
+    def recall_next(self, *, menu_open: bool = False) -> bool:
+        if self._recall_blocked(menu_open) or self._recall_position is None:
+            return False
+        if self._recall_position == len(self._recall_entries) - 1:
+            assert self._recall_draft is not None
+            self._restore_recall_draft(self._recall_draft)
+            self._reset_recall()
+        else:
+            self._recall_position += 1
+            self._load_saved_input(self._recall_entries[self._recall_position])
+        return True
 
     @property
     def python_pieces(self) -> tuple[Piece, ...]:
@@ -656,8 +758,11 @@ class HeadlessListener:
         if isinstance(value, PythonInput):
             self._repl.pending_lines = value.lines[:-1]
             self._python_line = PythonLine(value.lines[-1])
+            self._state.chip = None
+            self._command_chip_loaded = False
             self._sync_python_text()
         else:
+            self._repl.pending_lines = ()
             self.set_input_text(":" + value.tail)
             self._state.chip = value.chip
             self._command_chip_loaded = value.chip is not None
@@ -679,6 +784,7 @@ class HeadlessListener:
                 self._insert_saved_lines(value.lines)
             else:
                 return False
+            self._reset_recall()
             return True
         if presentation.type is self._types.command_input and isinstance(value, CommandInput):
             if self.input_mode == "empty":
@@ -690,9 +796,11 @@ class HeadlessListener:
                 self._insert_saved_lines((pieces,))
             else:
                 return False
+            self._reset_recall()
             return True
         return False
 
+    @grouped_operation
     def open_tutorial_target(self, presentation: Presentation) -> bool:
         if (
             presentation.type is not self._types.tutorial_target
@@ -718,8 +826,10 @@ class HeadlessListener:
         ):
             return False
         self._load_saved_input(presentation.value.saved_input)
+        self._reset_recall()
         return True
 
+    @grouped_operation
     def run_again(self, presentation: Presentation) -> bool:
         """Repeat a retained action using its captured operation and target."""
 
@@ -820,6 +930,7 @@ class HeadlessListener:
             return tuple(actions)
         return self._repl.classes.translators_for(value)
 
+    @grouped_operation
     def invoke_python_translator(
         self, presentation: Presentation, index: int
     ) -> Presentation | None:
@@ -857,6 +968,7 @@ class HeadlessListener:
             raise TypeError("input text must be a string")
         self._state.input_text = text
         self._python_line.set_text(text)
+        self._command_cursor = len(text)
 
     @staticmethod
     def _split_input(line: str) -> tuple[str, str | None] | None:
@@ -875,6 +987,7 @@ class HeadlessListener:
         argument = line[argument_start:] if argument_start < len(line) else None
         return command, argument
 
+    @grouped_operation
     def submit(self, line: str | None = None) -> None:
         if line is not None:
             self.set_input_text(line)
@@ -1047,6 +1160,7 @@ class HeadlessListener:
         finally:
             self._clear_attempt()
 
+    @grouped_operation
     def _finish_chip(self, command_name: str, chip: Chip) -> None:
         try:
             if self._pending_command_tail is not None:
@@ -1114,6 +1228,7 @@ class HeadlessListener:
             return self.insert_python_chip(presentation)
         return self.select(presentation, label)
 
+    @grouped_operation
     def dig_json(self, presentation: Presentation) -> bool:
         """Append one bounded level from a retained JSON collection."""
 
@@ -1172,6 +1287,7 @@ class HeadlessListener:
     ) -> bool:
         return self.select(presentation, label)
 
+    @grouped_operation
     def execute_stored_member(
         self, presentation: Presentation, command_name: str
     ) -> bool:
@@ -1432,6 +1548,7 @@ class HeadlessListener:
             if saved is not None:
                 self.restore_python_input(saved)
 
+    @grouped_operation
     def apply_listing_view(
         self,
         listing: DirectoryListing | ProcessListing,
@@ -1618,6 +1735,7 @@ class HeadlessListener:
         for row in self._listing_rows(listing):
             self._history.append(row)
 
+    @grouped_operation
     def _command_show(self, value: object | None) -> None:
         if type(value) is ProcessRef:
             try:

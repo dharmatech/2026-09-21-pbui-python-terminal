@@ -8,7 +8,7 @@ import pytest
 
 from pbui.chips import PythonChip, PythonLine, splice
 from pbui.commands import HeadlessListener, RootedFilesystem
-from pbui.text import display_width, layout, truncate_display
+from pbui.text import display_width, layout, stored_row_text, truncate_display
 
 
 class EmptyProcesses:
@@ -29,9 +29,9 @@ def listener_at(tmp_path, *, max_rows=500):
 def drawings(listener):
     # These predecessor assertions concern result rows.
     return tuple(
-        row.text for row in layout(listener.history, 10000).rows
-        if not listener.history.rows[row.logical_row].presentations
-        or listener.history.rows[row.logical_row].presentations[0].type not in (
+        stored_row_text(row) for row in listener.history.rows
+        if not row.presentations
+        or row.presentations[0].type not in (
             listener.types.python_input,
             listener.types.command_input,
             listener.types.menu_action_input,
@@ -278,8 +278,8 @@ def test_listing_member_label_captures_complete_row(tmp_path):
     listener.submit(":ls")
     member = next(p for p in listener.history.presentations if p.type is listener.types.file)
     complete_row = next(
-        row.text for row in layout(listener.history, 10000).rows
-        if "long-member-name" in row.text
+        stored_row_text(row) for row in listener.history.rows
+        if "long-member-name" in stored_row_text(row)
     )
     listener.set_input_text("id(")
     assert listener.select_for_input(member)

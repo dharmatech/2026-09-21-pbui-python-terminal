@@ -41,6 +41,7 @@ from pbui.text import (
     _display_clusters,
     display_width,
     layout,
+    row_indents,
     truncate_display,
 )
 
@@ -401,11 +402,20 @@ class HistorySurface(ScrollView):
             max(0, int(self.scroll_y)), len(self.current_layout.rows) - 1
         )
         logical_index = self.current_layout.rows[physical_row].logical_row
+        if logical_index is None:
+            physical_row += 1
+            if physical_row >= len(self.current_layout.rows):
+                return None
+            logical_index = self.current_layout.rows[physical_row].logical_row
+            assert logical_index is not None
+            wrapped_offset = 0
+        else:
+            first = physical_row
+            while first > 0 and self.current_layout.rows[first - 1].logical_row == logical_index:
+                first -= 1
+            wrapped_offset = physical_row - first
         if logical_index >= len(self._logical_rows):
             return None
-        first = physical_row
-        while first > 0 and self.current_layout.rows[first - 1].logical_row == logical_index:
-            first -= 1
         row = self._logical_rows[logical_index]
         owner = row.listing_owner
         listing = owner if type(owner) in {DirectoryListing, ProcessListing} else None
@@ -413,7 +423,7 @@ class HistorySurface(ScrollView):
             row,
             listing,
             row.presentations[0] if listing is not None and row.presentations else None,
-            physical_row - first,
+            wrapped_offset,
         )
 
     def _anchored_scroll_y(self, anchor: _ViewportAnchor | None) -> int:
@@ -515,11 +525,17 @@ class HistorySurface(ScrollView):
         if physical_row < 0 or physical_row >= len(self.current_layout.rows):
             return None
         rendered_row = self.current_layout.rows[physical_row]
-        if offset.x >= rendered_row.display_width:
-            return None
         logical_row = rendered_row.logical_row
-        return offset.x + sum(
-            row.display_width
+        if logical_row is None or logical_row >= len(self._logical_rows):
+            return None
+        indent = (
+            2 if self.current_layout.width >= 3
+            and row_indents(self._logical_rows[logical_row]) else 0
+        )
+        if offset.x < indent or offset.x >= rendered_row.display_width:
+            return None
+        return offset.x - indent + sum(
+            row.display_width - indent
             for row in self.current_layout.rows[:physical_row]
             if row.logical_row == logical_row
         )
@@ -1000,7 +1016,6 @@ class CommandInput(Widget):
     def __init__(self, listener: HeadlessListener, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.listener = listener
-        self._cursor_position = len(listener.input_text)
 
     @property
     def _python_editing(self) -> bool:
@@ -1010,15 +1025,22 @@ class CommandInput(Widget):
     def cursor_position(self) -> int:
         if self._python_editing:
             return self.listener.python_cursor
-        return min(self._cursor_position, len(self.listener.input_text))
+        return self.listener.command_cursor
 
     @cursor_position.setter
     def cursor_position(self, position: int) -> None:
         if type(position) is not int:
             raise TypeError("cursor position must be an integer")
-        self._cursor_position = min(max(0, position), len(self.listener.input_text))
-        if self.listener.pending_substring_listing is None:
-            self.listener.set_python_cursor(self._cursor_position)
+        if self._python_editing:
+            atom_count = sum(
+                len(piece) if isinstance(piece, str) else 1
+                for piece in self.listener.python_pieces
+            )
+            self.listener.set_python_cursor(min(max(0, position), atom_count))
+        else:
+            self.listener.set_command_cursor(
+                min(max(0, position), len(self.listener.input_text))
+            )
         self.refresh()
         if self.is_mounted and isinstance(self.screen, ListenerScreen):
             self.screen.synchronize()
@@ -1027,21 +1049,20 @@ class CommandInput(Widget):
         self.cursor_position = position
 
     def adopt_listener_cursor(self) -> None:
-        """Place the visible cursor at the end of newly yanked input."""
+        """Draw the caret supplied by the listener after a saved-input load."""
 
-        self._cursor_position = (
-            self.listener.python_cursor if self._python_editing
-            else len(self.listener.input_text)
-        )
         self.refresh()
 
     def clamp_cursor(self) -> None:
-        if self._python_editing:
-            self._cursor_position = self.listener.python_cursor
-            self.refresh()
-        else:
-            self._cursor_position = min(self._cursor_position, len(self.listener.input_text))
-            self.refresh()
+        """Refresh after the listener has changed the editor or its mode."""
+
+        self.refresh()
+
+    def _adopt_python_edit_cursor(self) -> None:
+        """Carry a Python edit caret across a change into command mode."""
+
+        if not self._python_editing:
+            self.listener.set_command_cursor(self.listener.python_cursor)
 
     def _synchronize(self, *, reveal_newest: bool = False) -> None:
         if self.is_mounted and isinstance(self.screen, ListenerScreen):
@@ -1057,7 +1078,7 @@ class CommandInput(Widget):
     def _insert(self, inserted: str) -> None:
         if self._python_editing:
             self.listener.insert_python_text(inserted)
-            self._cursor_position = self.listener.python_cursor
+            self._adopt_python_edit_cursor()
             self._synchronize()
             return
         position = self.cursor_position
@@ -1075,6 +1096,15 @@ class CommandInput(Widget):
 
     def on_key(self, event: events.Key) -> None:
         key = event.key
+        if key in {"up", "down"}:
+            traverse = (
+                self.listener.recall_previous if key == "up"
+                else self.listener.recall_next
+            )
+            if traverse(menu_open=self.screen.action_menu.is_open):
+                self._synchronize()
+            event.prevent_default().stop()
+            return
         python = self._python_editing
         position = self.cursor_position
         value = self.listener.input_text
@@ -1087,7 +1117,6 @@ class CommandInput(Widget):
                     "home": self.listener.python_home,
                     "end": self.listener.python_end,
                 }[key]()
-                self._cursor_position = self.listener.python_cursor
             else:
                 self.cursor_position = (
                     position - 1 if key == "left" else
@@ -1098,7 +1127,7 @@ class CommandInput(Widget):
         elif key == "backspace":
             if python:
                 self.listener.python_backspace()
-                self._cursor_position = self.listener.python_cursor
+                self._adopt_python_edit_cursor()
                 self._synchronize()
             elif (
                 self.listener.chip is not None
@@ -1115,7 +1144,7 @@ class CommandInput(Widget):
         elif key == "delete":
             if python:
                 self.listener.python_delete()
-                self._cursor_position = self.listener.python_cursor
+                self._adopt_python_edit_cursor()
                 self._synchronize()
             elif position < len(value):
                 self._set_edited_text(value[:position] + value[position + 1:], position)
@@ -1128,10 +1157,6 @@ class CommandInput(Widget):
                 self.listener.submit()
             else:
                 self.listener.submit(self.listener.input_text)
-            self._cursor_position = (
-                self.listener.python_cursor if self._python_editing
-                else len(self.listener.input_text)
-            )
             self._synchronize(
                 reveal_newest=(
                     self.listener.history.revision != revision
