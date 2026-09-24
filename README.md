@@ -35,13 +35,14 @@ it, its environment, and its dependencies with uv only.
 | [`history`](docs/design/implementation/history/README.md) | Blank lines between operations, and results indented under `›` | Specification drafted, waiting for review |
 | [`recall`](docs/design/implementation/recall/README.md) | Up and Down bring earlier submissions back into the input row | Implemented through recall 001 |
 | [`completion`](docs/design/implementation/completion/README.md) | Tab completes commands, Python names, attributes, and imports | Implemented through completion 002 |
+| [`sections`](docs/design/implementation/sections/README.md) | Tutorial subjects: Listener, then SymPy, with Up to the parent | Implemented through sections 001 |
 
 A new discussion should read [`AGENTS.md`](AGENTS.md). The listener,
 listings, REPL, chips, SymPy, transcript, popup, HTTP, tutorial,
-recall, and completion specifications are the law for the program as
+recall, completion, and sections specifications are the law for the program as
 it stands. Bottom is implemented through bottom 002. Recall is
 implemented through recall 001. Completion is implemented through
-completion 002. The
+completion 002. The sections series is implemented through sections 001. The
 [`history`](docs/design/implementation/history/README.md) specification
 is drafted and waiting for review. The
 [`transcript demo`](docs/design/implementation/transcript/demo.md) offers

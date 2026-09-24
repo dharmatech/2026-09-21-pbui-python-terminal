@@ -4133,7 +4133,7 @@ async def test_tutorial_card_screen_hits_styles_wrapping_scroll_and_menus(tmp_pa
             assert presentation_style(listener, control, control).underline
         _tutorial_hover(surface, back)
         assert documentation.sentence == (
-            "TUTORIAL BACK • Left: no previous card • Right: no menu"
+            "TUTORIAL BACK • Left: this section has no previous card • Right: no menu"
         )
         _tutorial_hover(surface, next_link)
         assert documentation.sentence == (
@@ -4141,7 +4141,7 @@ async def test_tutorial_card_screen_hits_styles_wrapping_scroll_and_menus(tmp_pa
         )
         _tutorial_hover(surface, up)
         assert documentation.sentence == (
-            "TUTORIAL UP “Contents” • Left: open • Right: no menu"
+            "TUTORIAL UP “Listener” • Left: open • Right: no menu"
         )
         _tutorial_hover(surface, example)
         assert documentation.sentence == (
@@ -4261,10 +4261,11 @@ async def test_tutorial_navigation_and_try_editor_states(tmp_path):
         screen.synchronize()
         up = _tutorial_presentation(listener, "target", direction="Up")
         _tutorial_click(surface, up)
-        contents = _tutorial_presentation(listener, "card")
-        assert contents.value.title == "Contents"
+        section = _tutorial_presentation(listener, "card")
+        assert section.value.title == "Listener"
         entry = next(
-            item for item in listener.history.presentations
+            item for row in listener.history.rows if section in row.presentations
+            for item in row.presentations
             if item.type is listener.types.tutorial_target
             and item.value.direction == "Contents"
             and item.value.destination.title == "5. Bring input back"
@@ -4280,7 +4281,7 @@ async def test_tutorial_navigation_and_try_editor_states(tmp_path):
         assert presentation_style(listener, last_next, last_next).dim
         _tutorial_hover(surface, last_next)
         assert documentation.sentence == (
-            "TUTORIAL NEXT • Left: no next card • Right: no menu"
+            "TUTORIAL NEXT • Left: this section has no next card • Right: no menu"
         )
         before = listener.history.rows
         _tutorial_click(surface, last_next)
@@ -4546,3 +4547,180 @@ async def test_bottom_documentation_hand_check_sequence(tmp_path):
         await pilot.press("escape")
         assert screen.command_input.mode == "PYTHON"
         assert line.sentence == "READY"
+
+
+@pytest.mark.asyncio
+async def test_tutorial_subject_stack_screen_controls_and_documentation(tmp_path):
+    listener = make_listener(tmp_path)
+    listener.submit(":tutorial")
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(120, 24)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        documentation = screen.documentation_line
+
+        def card_rows(card):
+            return tuple(row for row in listener.history.rows if card in row.presentations)
+
+        def card_targets(card):
+            return tuple(
+                item for row in card_rows(card) for item in row.presentations
+                if item.type is listener.types.tutorial_target
+            )
+
+        def target(card, label):
+            return next(item for item in card_targets(card) if item.value.label == label)
+
+        def check_controls(card):
+            for row in card_rows(card):
+                for item in row.presentations:
+                    if item.type not in {listener.types.tutorial_target, listener.types.tutorial_try}:
+                        continue
+                    label = item.value.label if item.type is listener.types.tutorial_target else "Try"
+                    for interval in item.intervals:
+                        rendered = surface.current_layout.rows[interval.physical_row]
+                        assert f"[{label}]" in rendered.text
+                        assert surface.current_layout.hit_test(
+                            interval.start_column, interval.physical_row
+                        ) is item
+
+        first = _tutorial_presentation(listener, "card")
+        assert first.value.title == "1. Presentations"
+        assert stored_row_text(card_rows(first)[-1]) == "[Back]  [Next]  [Up: Listener]"
+        assert stored_row_text(card_rows(first)[-2]) == "[Try] 1 + 2 + 3"
+        check_controls(first)
+        _tutorial_hover(surface, target(first, "Up: Listener"))
+        assert documentation.sentence == (
+            "TUTORIAL UP “Listener” • Left: open • Right: no menu"
+        )
+        _tutorial_click(surface, target(first, "Up: Listener"))
+
+        listener_section = _tutorial_presentation(listener, "card")
+        assert tuple(map(stored_row_text, card_rows(listener_section))) == (
+            "Listener",
+            "Choose a card to append it to history.",
+            "[1. Presentations]",
+            "[2. Colon commands]",
+            "[3. Reuse a value]",
+            "[4. The right-button menu]",
+            "[5. Bring input back]",
+            "[Up: Contents]",
+        )
+        assert {item.value.direction for item in card_targets(listener_section)} == {"Contents", "Up"}
+        check_controls(listener_section)
+        _tutorial_hover(surface, target(listener_section, "Up: Contents"))
+        assert documentation.sentence == (
+            "TUTORIAL UP “Contents” • Left: open • Right: no menu"
+        )
+        _tutorial_click(surface, target(listener_section, "Up: Contents"))
+
+        contents = _tutorial_presentation(listener, "card")
+        assert tuple(map(stored_row_text, card_rows(contents))) == (
+            "Contents",
+            "Choose a card to append it to history.",
+            "[Listener]",
+            "[SymPy]",
+        )
+        assert {item.value.direction for item in card_targets(contents)} == {"Contents"}
+        check_controls(contents)
+        sympy_entry = target(contents, "SymPy")
+        _tutorial_hover(surface, sympy_entry)
+        assert documentation.sentence == (
+            "TUTORIAL CONTENTS “SymPy” • Left: open • Right: no menu"
+        )
+        _tutorial_click(surface, sympy_entry, button=3)
+        assert not screen.action_menu.is_open
+        _tutorial_click(surface, sympy_entry)
+
+        sympy_section = _tutorial_presentation(listener, "card")
+        assert tuple(map(stored_row_text, card_rows(sympy_section))) == (
+            "SymPy",
+            "A SymPy expression stays a live object in history.",
+            "Its menu can simplify, expand, or factor it.",
+            "Import and a symbol come before the examples.",
+            "Up returns here from any of these cards.",
+            "[1. Import]",
+            "[2. Symbol]",
+            "[3. Expand]",
+            "[4. Factor]",
+            "[Up: Contents]",
+        )
+        assert {item.value.direction for item in card_targets(sympy_section)} == {"Contents", "Up"}
+        check_controls(sympy_section)
+        _tutorial_click(surface, target(sympy_section, "1. Import"))
+
+        import_card = _tutorial_presentation(listener, "card")
+        assert stored_row_text(card_rows(import_card)[-2]) == "[Try] import sympy"
+        assert stored_row_text(card_rows(import_card)[-1]) == "[Back]  [Next]  [Up: SymPy]"
+        check_controls(import_card)
+        import_back = target(import_card, "Back")
+        assert import_back.value.destination is None
+        assert presentation_style(listener, import_back, import_back).dim
+        _tutorial_hover(surface, import_back)
+        assert documentation.sentence == (
+            "TUTORIAL BACK • Left: this section has no previous card • Right: no menu"
+        )
+        before = listener.history.rows
+        _tutorial_click(surface, import_back)
+        assert listener.history.rows == before
+        import_next = target(import_card, "Next")
+        _tutorial_hover(surface, import_next)
+        assert documentation.sentence == (
+            "TUTORIAL NEXT “2. Symbol” • Left: open • Right: no menu"
+        )
+        _tutorial_click(surface, import_next)
+
+        symbol_card = _tutorial_presentation(listener, "card")
+        assert symbol_card.value.title == "2. Symbol"
+        assert stored_row_text(card_rows(symbol_card)[-2]) == '[Try] x = sympy.Symbol("x")'
+        assert stored_row_text(card_rows(symbol_card)[-1]) == "[Back]  [Next]  [Up: SymPy]"
+        assert target(symbol_card, "Back").value.destination is import_card.value
+        assert target(symbol_card, "Next").value.destination.title == "3. Expand"
+        assert target(symbol_card, "Up: SymPy").value.destination is sympy_section.value
+        _tutorial_hover(surface, target(symbol_card, "Up: SymPy"))
+        assert documentation.sentence == (
+            "TUTORIAL UP “SymPy” • Left: open • Right: no menu"
+        )
+        check_controls(symbol_card)
+        _tutorial_click(surface, target(symbol_card, "Next"))
+        expand_card = _tutorial_presentation(listener, "card")
+        assert expand_card.value.title == "3. Expand"
+        assert stored_row_text(card_rows(expand_card)[-2]) == "[Try] (x + 1)**2"
+        assert stored_row_text(card_rows(expand_card)[-1]) == "[Back]  [Next]  [Up: SymPy]"
+        check_controls(expand_card)
+        _tutorial_click(surface, target(expand_card, "Next"))
+        factor_card = _tutorial_presentation(listener, "card")
+        assert factor_card.value.title == "4. Factor"
+        assert stored_row_text(card_rows(factor_card)[-2]) == "[Try] x**2 - 1"
+        assert stored_row_text(card_rows(factor_card)[-1]) == "[Back]  [Next]  [Up: SymPy]"
+        assert target(factor_card, "Back").value.destination is expand_card.value
+        factor_next = target(factor_card, "Next")
+        assert factor_next.value.destination is None
+        assert presentation_style(listener, factor_next, factor_next).dim
+        _tutorial_hover(surface, factor_next)
+        assert documentation.sentence == (
+            "TUTORIAL NEXT • Left: this section has no next card • Right: no menu"
+        )
+        before = listener.history.rows
+        _tutorial_click(surface, factor_next)
+        assert listener.history.rows == before
+        check_controls(factor_card)
+        _tutorial_click(surface, target(factor_card, "Up: SymPy"))
+        assert _tutorial_presentation(listener, "card").value is sympy_section.value
+        _tutorial_click(surface, target(sympy_section, "Up: Contents"))
+        assert _tutorial_presentation(listener, "card").value is contents.value
+        _tutorial_click(surface, target(contents, "Listener"))
+        listener_section = _tutorial_presentation(listener, "card")
+        _tutorial_click(surface, target(listener_section, "5. Bring input back"))
+        last = _tutorial_presentation(listener, "card")
+        assert last.value.title == "5. Bring input back"
+        last_next = target(last, "Next")
+        assert presentation_style(listener, last_next, last_next).dim
+        before = listener.history.rows
+        _tutorial_click(surface, last_next)
+        assert listener.history.rows == before
+        await pilot.resize_terminal(82, 18)
+        await pilot.pause()
+        check_controls(last)
+        check_controls(contents)

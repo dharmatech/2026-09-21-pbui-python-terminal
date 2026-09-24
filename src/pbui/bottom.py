@@ -204,10 +204,12 @@ def format_documentation(
             )
         else:
             control = presentation.value
-            left = (
-                "open" if control.destination is not None else
-                "no previous card" if control.direction == "Back" else "no next card"
-            )
+            if control.destination is not None:
+                left = "open"
+            elif control.direction == "Back":
+                left = "this section has no previous card"
+            else:
+                left = "this section has no next card"
         sentence = _clauses(target, left)
         return f"{lead} — {sentence}{_CANCEL}" if lead else sentence
 

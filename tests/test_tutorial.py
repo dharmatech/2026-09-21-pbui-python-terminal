@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import os
 import socket
 import subprocess
@@ -98,11 +99,22 @@ def test_exact_immutable_stack_and_pure_construction(monkeypatch):
     def forbidden(*_args, **_kwargs):
         raise AssertionError("stack construction performed I/O")
 
+    original_import = builtins.__import__
+
+    def no_sympy_import(name, *args, **kwargs):
+        if name == "sympy" or name.startswith("sympy."):
+            raise AssertionError("stack construction imported SymPy")
+        return original_import(name, *args, **kwargs)
+
     with monkeypatch.context() as patch:
         patch.setattr(os, "stat", forbidden)
         patch.setattr(os, "scandir", forbidden)
+        patch.setattr(os, "listdir", forbidden)
+        patch.setattr(builtins, "open", forbidden)
         patch.setattr(socket, "create_connection", forbidden)
+        patch.setattr(socket, "socket", forbidden)
         patch.setattr(subprocess, "Popen", forbidden)
+        patch.setattr(builtins, "__import__", no_sympy_import)
         stack = make_tutorial_stack()
 
     assert tuple(card.identifier for card in stack.tour) == (
@@ -144,22 +156,111 @@ def test_exact_immutable_stack_and_pure_construction(monkeypatch):
             "Right-click the row and choose yank for the same load.",
         ),
     )
+    assert len(stack.tour[0].examples) == 1
     assert stack.tour[0].examples[0].saved_input == PythonInput((("1 + 2 + 3",),))
+    assert stack.tour[0].examples[0].source == "1 + 2 + 3"
     assert stack.tour[1].examples[0].saved_input == CommandInput("ls")
+    assert stack.tour[1].examples[0].source == ":ls"
     assert tuple(card.examples for card in stack.tour[2:]) == ((), (), ())
+
+    assert stack.contents.identifier == "contents"
     assert stack.contents.title == "Contents"
     assert stack.contents.body == ("Choose a card to append it to history.",)
-    assert all(entry is card for entry, card in zip(stack.contents.entries, stack.tour))
-    assert tuple(card.previous.destination_id for card in stack.tour) == (
-        None, "presentations", "commands", "values", "menus"
+    assert tuple(card.identifier for card in stack.sections) == ("listener", "sympy")
+    assert tuple(card.title for card in stack.sections) == ("Listener", "SymPy")
+    assert stack.sections[0].body == ("Choose a card to append it to history.",)
+    assert stack.sections[1].body == (
+        "A SymPy expression stays a live object in history.",
+        "Its menu can simplify, expand, or factor it.",
+        "Import and a symbol come before the examples.",
+        "Up returns here from any of these cards.",
     )
-    assert tuple(card.next.destination_id for card in stack.tour) == (
-        "commands", "values", "menus", "yank", None
+    assert stack.contents.entries == stack.sections
+    assert all(entry is card for entry, card in zip(stack.contents.entries, stack.sections))
+    assert stack.sections[0].entries == stack.tour
+    assert stack.sections[1].entries == stack.sympy_leaves
+    assert all(entry is card for section, leaves in (
+        (stack.sections[0], stack.tour), (stack.sections[1], stack.sympy_leaves)
+    ) for entry, card in zip(section.entries, leaves))
+
+    assert tuple(card.identifier for card in stack.sympy_leaves) == (
+        "sympy-import", "sympy-symbol", "sympy-expand", "sympy-factor",
     )
-    assert all(card.contents.destination_id == "contents" for card in stack.tour)
+    assert tuple(card.title for card in stack.sympy_leaves) == (
+        "1. Import", "2. Symbol", "3. Expand", "4. Factor",
+    )
+    assert tuple(card.body for card in stack.sympy_leaves) == (
+        (
+            "Import SymPy to make the sympy name available.",
+            "Enter adds an input row but no value row.",
+            "Later cards use that name.",
+        ),
+        (
+            "This binds x to a SymPy symbol.",
+            "Enter adds an input row but no value row.",
+            "Later cards use x.",
+        ),
+        (
+            "Enter (x + 1)**2 to keep the power in history.",
+            "Open that expression row's menu and choose expand.",
+            "A new row shows x**2 + 2*x + 1.",
+            "The original power stays in history.",
+        ),
+        (
+            "Enter x**2 - 1 to keep the polynomial in history.",
+            "Open that expression row's menu and choose factor.",
+            "A new row shows (x - 1)⋅(x + 1).",
+            "The original polynomial stays in history.",
+        ),
+    )
+    sources = ("import sympy", 'x = sympy.Symbol("x")', "(x + 1)**2", "x**2 - 1")
+    for card, source in zip(stack.sympy_leaves, sources):
+        assert card.examples[0].source == source
+        assert card.examples[0].saved_input == PythonInput(((source,),))
+        assert len(card.examples) == 1
+
+    for section, leaves in ((stack.sections[0], stack.tour),
+                            (stack.sections[1], stack.sympy_leaves)):
+        assert section.previous is section.next is None
+        assert section.contents == TutorialLink("Up", "contents")
+        assert stack.get(section.contents.destination_id) is stack.contents
+        for index, card in enumerate(leaves):
+            assert stack.get(card.identifier) is card
+            assert card.entries == ()
+            assert card.contents == TutorialLink("Up", section.identifier)
+            assert stack.get(card.contents.destination_id) is section
+            assert card.previous == TutorialLink(
+                "Back", leaves[index - 1].identifier if index else None
+            )
+            assert card.next == TutorialLink(
+                "Next", leaves[index + 1].identifier
+                if index + 1 < len(leaves) else None
+            )
+            for link, expected in (
+                (card.previous, leaves[index - 1] if index else None),
+                (card.next, leaves[index + 1] if index + 1 < len(leaves) else None),
+            ):
+                if expected is None:
+                    assert link.destination_id is None
+                else:
+                    assert stack.get(link.destination_id) is expected
     assert stack.contents.previous is stack.contents.next is stack.contents.contents is None
+    assert set(card.identifier for card in (
+        *stack.tour, *stack.sympy_leaves, *stack.sections, stack.contents
+    )) == {
+        "presentations", "commands", "values", "menus", "yank", "listener",
+        "sympy", "sympy-import", "sympy-symbol", "sympy-expand",
+        "sympy-factor", "contents",
+    }
+    assert stack.get("contents") is stack.contents
+    with pytest.raises(KeyError):
+        stack.get("missing")
     with pytest.raises(FrozenInstanceError):
         stack.tour[0].title = "Changed"
+    with pytest.raises(FrozenInstanceError):
+        stack.sections[0].entries = ()
+    with pytest.raises(FrozenInstanceError):
+        stack.sections = ()
 
 
 def test_command_records_then_appends_fresh_card_without_replacing_history(tmp_path):
@@ -180,7 +281,7 @@ def test_command_records_then_appends_fresh_card_without_replacing_history(tmp_p
         "  1. Presentations",
         *(f"  {line}" for line in listener.tutorial_stack.tour[0].body),
         "  [Try] 1 + 2 + 3",
-        "  [Back]  [Next]  [Up: Contents]",
+        "  [Back]  [Next]  [Up: Listener]",
     )
     assert all(row.presentations[0] is first for row in card_rows(listener, first))
     before = listener.history.rows
@@ -226,23 +327,121 @@ def test_nested_hits_navigation_and_disabled_boundaries(tmp_path):
     assert len(transcript(listener)) == count
     assert listener.select_for_input(control(listener, second, "Back"))
     assert latest_card(listener).value is first.value
-    assert listener.select_for_input(control(listener, second, "Up"))
+    assert listener.select_for_input(control(listener, first, "Up"))
+    section = latest_card(listener)
+    assert section.value is listener.tutorial_stack.sections[0]
+    assert text_rows(listener)[-6:] == (
+        *(f"[{card.title}]" for card in listener.tutorial_stack.tour),
+        "[Up: Contents]",
+    )
+    assert listener.select_for_input(control(listener, section, "Up"))
     contents = latest_card(listener)
     assert contents.value is listener.tutorial_stack.contents
-    assert len(card_rows(listener, contents)) == 7
-    assert text_rows(listener)[-5:] == tuple(f"[{card.title}]" for card in listener.tutorial_stack.tour)
-    entry = next(
+    assert len(card_rows(listener, contents)) == 4
+    assert text_rows(listener)[-2:] == ("[Listener]", "[SymPy]")
+    entries = [
         item for row in card_rows(listener, contents) for item in row.presentations[1:]
+    ]
+    assert len(entries) == 2
+    assert entries[0].value.destination is listener.tutorial_stack.sections[0]
+    assert entries[1].value.destination is listener.tutorial_stack.sections[1]
+    assert listener.select_for_input(entries[0])
+    assert latest_card(listener).value is listener.tutorial_stack.sections[0]
+    gesture_entry = next(
+        item for row in card_rows(listener, latest_card(listener))
+        for item in row.presentations[1:]
         if item.value.destination is listener.tutorial_stack.tour[3]
     )
-    assert listener.select_for_input(entry)
+    assert listener.select_for_input(gesture_entry)
     assert latest_card(listener).value is listener.tutorial_stack.tour[3]
+
     last = listener.append_tutorial_card(listener.tutorial_stack.tour[-1])
     next_control = control(listener, last, "Next")
     assert next_control.value.destination is None
     before = listener.history.rows
     assert not listener.select_for_input(next_control)
     assert listener.history.rows == before
+    assert len(transcript(listener)) == count
+
+
+def test_section_rows_and_stored_control_destinations(tmp_path):
+    listener = make_listener(tmp_path)
+    stack = listener.tutorial_stack
+    for card in (stack.contents, *stack.sections, *stack.tour, *stack.sympy_leaves):
+        outer = listener.append_tutorial_card(card)
+        rows = card_rows(listener, outer)
+        assert len(rows) <= 20
+        assert outer.value is card
+        assert stored_row_text(rows[0]) == card.title
+        for line in card.body:
+            assert any(stored_row_text(row) == line for row in rows)
+        targets = [
+            item.value for row in rows for item in row.presentations[1:]
+            if item.type is listener.types.tutorial_target
+        ]
+        if card is stack.contents:
+            assert tuple(target.label for target in targets) == ("Listener", "SymPy")
+            assert tuple(target.destination for target in targets) == stack.sections
+            assert text_rows(listener)[-2:] == ("[Listener]", "[SymPy]")
+        elif card in stack.sections:
+            assert tuple(target.label for target in targets) == (
+                *(leaf.title for leaf in card.entries), "Up: Contents",
+            )
+            assert tuple(target.destination for target in targets) == (
+                *card.entries, stack.contents,
+            )
+            assert stored_row_text(rows[-1]) == "[Up: Contents]"
+        else:
+            parent = stack.get(card.contents.destination_id)
+            assert tuple(target.direction for target in targets) == ("Back", "Next", "Up")
+            assert tuple(target.label for target in targets) == (
+                "Back", "Next", f"Up: {parent.title}",
+            )
+            assert targets[2].destination is parent
+            assert stored_row_text(rows[-1]) == (
+                f"[Back]  [Next]  [Up: {parent.title}]"
+            )
+            for target, link in zip(targets[:2], (card.previous, card.next)):
+                assert target.destination is (
+                    stack.get(link.destination_id) if link.destination_id else None
+                )
+
+
+def test_sympy_navigation_stays_in_section(tmp_path):
+    listener = make_listener(tmp_path)
+    stack = listener.tutorial_stack
+    listener.submit(":tutorial")
+    first = latest_card(listener)
+    assert listener.select_for_input(control(listener, first, "Up"))
+    section = latest_card(listener)
+    assert section.value is stack.sections[0]
+    assert listener.select_for_input(control(listener, section, "Up"))
+    contents = latest_card(listener)
+    sympy_entry = next(
+        item for row in card_rows(listener, contents) for item in row.presentations[1:]
+        if item.value.destination is stack.sections[1]
+    )
+    assert listener.select_for_input(sympy_entry)
+    sympy_section = latest_card(listener)
+    assert sympy_section.value is stack.sections[1]
+    import_entry = next(
+        item for row in card_rows(listener, sympy_section)
+        for item in row.presentations[1:]
+        if item.value.destination is stack.sympy_leaves[0]
+    )
+    assert listener.select_for_input(import_entry)
+    import_card = latest_card(listener)
+    assert import_card.value is stack.sympy_leaves[0]
+    assert not listener.select_for_input(control(listener, import_card, "Back"))
+    assert listener.select_for_input(control(listener, import_card, "Next"))
+    assert latest_card(listener).value is stack.sympy_leaves[1]
+    factor = listener.append_tutorial_card(stack.sympy_leaves[-1])
+    before = listener.history.rows
+    assert not listener.select_for_input(control(listener, factor, "Next"))
+    assert listener.history.rows == before
+    assert listener.select_for_input(control(listener, factor, "Up"))
+    assert latest_card(listener).value is stack.sections[1]
+    assert len(transcript(listener)) == 1
 
 
 def test_navigation_preserves_composition_accept_and_substring_state(tmp_path):
@@ -336,6 +535,29 @@ def test_try_loads_exact_editable_pieces_only_at_empty_prompt(tmp_path):
     assert listener.history.rows == before
     listener.set_input_text(":ls .")
     assert listener.input_text == ":ls ."
+
+
+@pytest.mark.parametrize(
+    ("card_index", "source"),
+    ((0, "import sympy"), (2, "(x + 1)**2")),
+)
+def test_sympy_try_loads_without_evaluating(tmp_path, card_index, source):
+    listener = make_listener(tmp_path)
+    listener.submit(":tutorial")
+    card = listener.append_tutorial_card(listener.tutorial_stack.sympy_leaves[card_index])
+    example = try_control(listener, card)
+    before_rows = listener.history.rows
+    before_transcript = transcript(listener)
+    assert listener.select_for_input(example)
+    assert listener.python_pieces == (source,)
+    assert listener.input_text == source
+    assert listener.python_cursor == len(source)
+    assert listener.history.rows == before_rows
+    assert transcript(listener) == before_transcript
+    assert all(
+        item.type is not listener.types.value
+        for item in listener.history.presentations
+    )
 
 
 @pytest.mark.parametrize("busy", ("text", "chip", "continuation", "accept", "substring"))

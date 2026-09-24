@@ -52,10 +52,12 @@ class TutorialTarget:
 @dataclass(frozen=True, slots=True)
 class TutorialStack:
     tour: tuple[TutorialCard, ...]
+    sympy_leaves: tuple[TutorialCard, ...]
+    sections: tuple[TutorialCard, ...]
     contents: TutorialCard
 
     def get(self, identifier: str) -> TutorialCard:
-        for card in (*self.tour, self.contents):
+        for card in (*self.tour, *self.sympy_leaves, *self.sections, self.contents):
             if card.identifier == identifier:
                 return card
         raise KeyError(identifier)
@@ -124,19 +126,94 @@ def make_tutorial_stack() -> TutorialStack:
                 "Next", definitions[index + 1][0]
                 if index + 1 < len(definitions) else None,
             ),
-            contents=TutorialLink("Up", "contents"),
+            contents=TutorialLink("Up", "listener"),
         )
         for index, (identifier, title, body, examples) in enumerate(definitions)
     )
+    sympy_definitions = (
+        (
+            "sympy-import", "1. Import",
+            (
+                "Import SymPy to make the sympy name available.",
+                "Enter adds an input row but no value row.",
+                "Later cards use that name.",
+            ),
+            "import sympy",
+        ),
+        (
+            "sympy-symbol", "2. Symbol",
+            (
+                "This binds x to a SymPy symbol.",
+                "Enter adds an input row but no value row.",
+                "Later cards use x.",
+            ),
+            'x = sympy.Symbol("x")',
+        ),
+        (
+            "sympy-expand", "3. Expand",
+            (
+                "Enter (x + 1)**2 to keep the power in history.",
+                "Open that expression row's menu and choose expand.",
+                "A new row shows x**2 + 2*x + 1.",
+                "The original power stays in history.",
+            ),
+            "(x + 1)**2",
+        ),
+        (
+            "sympy-factor", "4. Factor",
+            (
+                "Enter x**2 - 1 to keep the polynomial in history.",
+                "Open that expression row's menu and choose factor.",
+                "A new row shows (x - 1)⋅(x + 1).",
+                "The original polynomial stays in history.",
+            ),
+            "x**2 - 1",
+        ),
+    )
+    sympy_leaves = tuple(
+        TutorialCard(
+            identifier, title, body,
+            (TutorialExample(PythonInput(((source,),)), source),),
+            previous=TutorialLink(
+                "Back", sympy_definitions[index - 1][0] if index else None,
+            ),
+            next=TutorialLink(
+                "Next", sympy_definitions[index + 1][0]
+                if index + 1 < len(sympy_definitions) else None,
+            ),
+            contents=TutorialLink("Up", "sympy"),
+        )
+        for index, (identifier, title, body, source) in enumerate(sympy_definitions)
+    )
+    sections = (
+        TutorialCard(
+            "listener", "Listener", ("Choose a card to append it to history.",),
+            contents=TutorialLink("Up", "contents"), entries=tour,
+        ),
+        TutorialCard(
+            "sympy", "SymPy",
+            (
+                "A SymPy expression stays a live object in history.",
+                "Its menu can simplify, expand, or factor it.",
+                "Import and a symbol come before the examples.",
+                "Up returns here from any of these cards.",
+            ),
+            contents=TutorialLink("Up", "contents"), entries=sympy_leaves,
+        ),
+    )
     contents = TutorialCard(
         "contents", "Contents", ("Choose a card to append it to history.",),
-        entries=tour,
+        entries=sections,
     )
-    return TutorialStack(tour, contents)
+    return TutorialStack(tour, sympy_leaves, sections, contents)
 
 
-def _target(link: TutorialLink, label: str, stack: TutorialStack) -> TutorialTarget:
+def _target(link: TutorialLink, stack: TutorialStack) -> TutorialTarget:
     destination = None if link.destination_id is None else stack.get(link.destination_id)
+    label = (
+        f"Up: {destination.title}"
+        if link.direction == "Up" and destination else link.direction
+    )
     return TutorialTarget(link.direction, label, destination)
 
 
@@ -186,17 +263,23 @@ def tutorial_rows(
     )
     navigation: tuple[HistoryRow, ...] = ()
     if card.contents is not None:
-        if card.previous is None or card.next is None:
-            raise ValueError("a tour card needs both boundary links")
-        navigation = (
-            row(
-                _control(_target(card.previous, "Back", stack), context, types, "Back"),
-                "  ",
-                _control(_target(card.next, "Next", stack), context, types, "Next"),
-                "  ",
-                _control(_target(card.contents, "Up: Contents", stack), context, types, "Up: Contents"),
-            ),
-        )
+        up = _target(card.contents, stack)
+        if card.entries:
+            if card.previous is not None or card.next is not None:
+                raise ValueError("a section cannot have sibling links")
+            navigation = (row(_control(up, context, types, up.label)),)
+        else:
+            if card.previous is None or card.next is None:
+                raise ValueError("a leaf needs both boundary links")
+            navigation = (
+                row(
+                    _control(_target(card.previous, stack), context, types, "Back"),
+                    "  ",
+                    _control(_target(card.next, stack), context, types, "Next"),
+                    "  ",
+                    _control(up, context, types, up.label),
+                ),
+            )
 
     body_budget = max(0, 20 - 1 - len(example_rows) - len(entry_rows) - len(navigation))
     if len(body_lines) > body_budget:
