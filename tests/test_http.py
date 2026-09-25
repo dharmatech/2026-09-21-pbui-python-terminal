@@ -305,7 +305,7 @@ def test_json_summary_dig_nested_identity_and_plain_containers(tmp_path):
     parent_row = listener.history.rows[-1]
     parent = parent_row.presentations[0]
     assert rows(listener)[-1] == '▸ JsonObject (2 keys)'
-    assert actions(listener, parent) == []
+    assert actions(listener, parent) == ['To DataFrame']
     assert listener.python_classes.lookup({}) is None
     assert listener.python_classes.lookup([]) is None
     before = len(listener.history.rows)

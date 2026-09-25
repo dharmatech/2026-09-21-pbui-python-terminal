@@ -62,13 +62,14 @@ program with a Lisp machine or a CLIM port.
 For implementation of the program as it stands, the accepted
 specifications under `docs/design/implementation/` are the law:
 listener, listings, repl, chips, sympy, transcript, popup, http,
-tutorial, sections, recall, completion, bsky, and pandas. Their
+tutorial, sections, recall, completion, bsky, pandas, and records. Their
 charters are the original assignments, not the current law. Bottom is
 accepted and implemented through bottom 002. Recall is accepted and implemented through recall
 001. Completion is accepted and implemented through completion 002.
 The sections specification is accepted and implemented through sections 001.
 The bsky specification is accepted and implemented through bsky 002.
 The pandas specification is accepted and implemented through pandas 001.
+The records specification is accepted and implemented through records 001.
 `docs/design/implementation/bottom/checkpoints/003-remove-no-target-wording.md`
 is ready to implement and is not part of the history work.
 `docs/design/implementation/history/charter.md` is the open

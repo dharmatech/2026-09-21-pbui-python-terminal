@@ -72,6 +72,7 @@ from pbui.http import (
 )
 from pbui.text import HistoryRow, LiteralFragment, logical_presentation_text, truncate_display
 from pbui.repl import PythonEvaluator, ValueClasses, ValueTranslator
+from pbui.records import to_dataframe, to_json_records
 from pbui.transcript import CommandInput, MenuActionInput, PythonInput, append_input
 from pbui.tutorial import (
     TutorialCard, TutorialExample, TutorialStack, TutorialTarget,
@@ -1199,6 +1200,13 @@ class HeadlessListener:
                 actions.append(ValueTranslator("json", lambda _value: parsed))
             actions.append(ValueTranslator("body", self._show_http_body))
             return tuple(actions)
+        if type(value) is JsonObject or (
+            type(value) is JsonArray
+            and all(type(record) is JsonObject for record in value)
+        ):
+            return (ValueTranslator("To DataFrame", to_dataframe),)
+        if isinstance(value, pd.DataFrame):
+            return (ValueTranslator("To JSON records", to_json_records),)
         return self._repl.classes.translators_for(value)
 
     @grouped_operation

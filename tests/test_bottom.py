@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import pandas as pd
 
 from pbui.bottom import format_mode
 from pbui.commands import HeadlessListener, RootedFilesystem
@@ -105,7 +106,7 @@ def test_documentation_target_kinds_and_saved_values(tmp_path):
         (types.value, 9, "PYTHON VALUE • Left: show • Right: no menu"),
         (types.value, GetRequest("https://example.test/a\nb"), "GET REQUEST “https://example.test/a\\nb” • Left: show • Right: menu"),
         (types.value, HttpResponse(201, "https://example.test/end", None, b""), "HTTP RESPONSE 201 “https://example.test/end” • Left: show • Right: menu"),
-        (types.value, JsonObject({"a": 1, "b": 2}), "JSON OBJECT (2 keys) • Left: list members • Right: no menu"),
+        (types.value, JsonObject({"a": 1, "b": 2}), "JSON OBJECT (2 keys) • Left: list members • Right: menu"),
         (types.value, JsonArray([1, 2, 3]), "JSON ARRAY (3 elements) • Left: list members • Right: no menu"),
         (types.text, "text", "TEXT • Left: no action • Right: no menu"),
         (types.error, "error", "ERROR • Left: no action • Right: no menu"),
@@ -114,6 +115,57 @@ def test_documentation_target_kinds_and_saved_values(tmp_path):
     for index, (presentation_type, value, expected) in enumerate(cases):
         presentation = Presentation(10000 + index, presentation_type, value)
         assert format_documentation(listener, presentation) == expected
+
+
+def test_records_value_documentation_in_all_modes(tmp_path):
+    from pbui.bottom import format_documentation, format_menu_item_documentation
+    from pbui.http import JsonArray, JsonObject
+    from pbui.substrate import Presentation
+
+    listener = listener_at(tmp_path)
+    value_type = listener.types.value
+    eligible = (
+        (JsonObject({"a": 1}), "JSON OBJECT (1 keys)", "To DataFrame"),
+        (JsonArray([JsonObject({"a": 1}), JsonObject({"b": 2})]),
+         "JSON ARRAY (2 elements)", "To DataFrame"),
+        (JsonArray(), "JSON ARRAY (0 elements)", "To DataFrame"),
+        (pd.DataFrame({"a": [1]}), "DATAFRAME", "To JSON records"),
+    )
+    for value, target, label in eligible:
+        presentation = listener._repl.display_value(value)
+        assert presentation is not None
+        left = "show frame preview" if target == "DATAFRAME" else "list members"
+        assert format_documentation(listener, presentation) == (
+            f"{target} • Left: {left} • Right: menu"
+        )
+        assert format_menu_item_documentation(listener, label, presentation) == (
+            f"MENU “{label}” ON {target} • Left: apply • Right: no menu"
+        )
+        listener.set_input_text("f()")
+        listener.set_python_cursor(2)
+        assert format_documentation(listener, presentation) == (
+            f"{target} • Left: insert value into expression • Right: menu"
+        )
+        listener.set_input_text('"text"')
+        listener.set_python_cursor(2)
+        assert format_documentation(listener, presentation) == (
+            f"{target} • Left: insertion unavailable in string or comment • Right: menu"
+        )
+        listener.cancel()
+    ineligible = (
+        (JsonArray([JsonObject(), 1]), "JSON ARRAY (2 elements) • Left: list members • Right: no menu"),
+        (pd.Series([1]), "SERIES • Left: list values • Right: no menu"),
+    )
+    for index, (value, expected) in enumerate(ineligible):
+        assert format_documentation(
+            listener, Presentation(2100 + index, value_type, value)
+        ) == expected
+
+    selected = Presentation(2200, value_type, eligible[1][0])
+    listener.submit(":rm")
+    assert format_documentation(listener, selected) == (
+        "SELECTING FILE FOR rm — JSON ARRAY (2 elements) • Left: cannot use Value; File required • Right: no menu • Esc: cancel • Ctrl-G: cancel"
+    )
 
 
 @pytest.mark.parametrize(

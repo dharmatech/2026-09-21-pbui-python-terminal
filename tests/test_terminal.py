@@ -3051,10 +3051,11 @@ async def test_pandas_screen_preview_hits_composition_and_documentation(tmp_path
         screen = app.screen
         surface = screen.history_surface
         assert format_documentation(listener, source) == (
-            "DATAFRAME • Left: show frame preview • Right: no menu"
+            "DATAFRAME • Left: show frame preview • Right: menu"
         )
         _click_history_presentation(screen, source, button=3)
-        assert not screen.action_menu.is_open
+        assert screen.action_menu.labels == ("To JSON records",)
+        screen.close_menu()
         _click_history_presentation(screen, source, chain=2)
         assert len(listener.history.rows) == 2
         _click_history_presentation(screen, source)
@@ -3123,7 +3124,8 @@ async def test_pandas_screen_preview_hits_composition_and_documentation(tmp_path
         screen.open_menu(column)
         assert not screen.action_menu.is_open
         screen.open_menu(source)
-        assert not screen.action_menu.is_open
+        assert screen.action_menu.labels == ("To JSON records",)
+        screen.close_menu()
         surface.set_hovered_presentation(column)
         await pilot.press("ctrl+o")
         assert not screen.action_menu.is_open
@@ -3870,7 +3872,8 @@ async def test_http_screen_menus_json_dig_and_wrapped_member_hits(tmp_path):
         assert root_row.presentations == (root,)
         assert surface.current_layout.rows[-1].text == '  ▸ JsonObject (1 keys)'
         _click_history_presentation(screen, root, button=3)
-        assert not screen.action_menu.is_open
+        assert screen.action_menu.labels == ('To DataFrame',)
+        screen.close_menu()
         _click_history_presentation(screen, root)
         assert listener.history.rows[-2] is root_row
         data_row = listener.history.rows[-1]
@@ -3916,6 +3919,65 @@ async def test_http_screen_menus_json_dig_and_wrapped_member_hits(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_records_screen_menu_round_trip_and_json_dig(tmp_path):
+    records = JsonArray([
+        JsonObject({"name": "Ada", "count": 2}),
+        JsonObject({"name": "Grace", "count": 3}),
+    ])
+    listener = make_listener(tmp_path)
+    listener.python_namespace["records"] = records
+    listener.submit("records")
+    source = listener.history.presentations[-1]
+    app = PbuiApp(listener)
+    async with app.run_test(size=(90, 18)):
+        screen = app.screen
+        surface = screen.history_surface
+        surface.set_hovered_presentation(source)
+        screen.synchronize()
+        assert screen.documentation_line.sentence == (
+            "JSON ARRAY (2 elements) • Left: list members • Right: menu"
+        )
+        _open_menu_for(screen, source)
+        assert screen.action_menu.labels == ("To DataFrame",)
+        _move_menu_index(screen.action_menu, 0)
+        assert screen.documentation_line.sentence == (
+            "MENU “To DataFrame” ON JSON ARRAY (2 elements) • Left: apply • Right: no menu"
+        )
+        _click_menu_label(screen.action_menu, "To DataFrame")
+        frame_value = listener.history.presentations[-1]
+        assert isinstance(frame_value.value, pd.DataFrame)
+        assert frame_value.value.shape == (2, 2)
+        assert source.value is records
+        interval = frame_value.intervals[0]
+        surface.scroll_to_row(interval.physical_row)
+        surface.on_mouse_move(_mouse_event(
+            events.MouseMove, surface, interval.start_column,
+            interval.physical_row - int(surface.scroll_y),
+        ))
+        assert screen.documentation_line.sentence == (
+            "DATAFRAME • Left: show frame preview • Right: menu"
+        )
+        _open_menu_for(screen, frame_value)
+        assert screen.action_menu.labels == ("To JSON records",)
+        _click_menu_label(screen.action_menu, "To JSON records")
+        returned = listener.history.presentations[-1]
+        assert type(returned.value) is JsonArray
+        assert returned.value == records
+        interval = returned.intervals[0]
+        surface.scroll_to_row(interval.physical_row)
+        surface.on_mouse_move(_mouse_event(
+            events.MouseMove, surface, interval.start_column,
+            interval.physical_row - int(surface.scroll_y),
+        ))
+        assert screen.documentation_line.sentence == (
+            "JSON ARRAY (2 elements) • Left: list members • Right: menu"
+        )
+        _click_history_presentation(screen, returned)
+        assert listener.history.rows[-2].presentations[0].value is returned.value[0]
+        assert listener.history.rows[-1].presentations[0].value is returned.value[1]
+
+
+@pytest.mark.asyncio
 async def test_http_screen_json_documentation_chip_and_modal_precedence(tmp_path):
     tree = JsonObject({'child': JsonArray([4])})
     listener = make_listener(tmp_path)
@@ -3931,15 +3993,16 @@ async def test_http_screen_json_documentation_chip_and_modal_precedence(tmp_path
         x, y = interval.start_column, interval.physical_row - int(surface.scroll_y)
         surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
         assert screen.documentation_line.sentence == (
-            "JSON OBJECT (1 keys) • Left: list members • Right: no menu"
+            "JSON OBJECT (1 keys) • Left: list members • Right: menu"
         )
         await pilot.press('ctrl+o')
-        assert not screen.action_menu.is_open
+        assert screen.action_menu.labels == ('To DataFrame',)
+        screen.close_menu()
         listener.set_input_text('f()')
         editor.cursor_position = 2
         screen.synchronize()
         assert screen.documentation_line.sentence == (
-            'JSON OBJECT (1 keys) • Left: insert value into expression • Right: no menu'
+            'JSON OBJECT (1 keys) • Left: insert value into expression • Right: menu'
         )
         before = listener.history.rows
         _click_history_presentation(screen, root)
@@ -3950,7 +4013,7 @@ async def test_http_screen_json_documentation_chip_and_modal_precedence(tmp_path
         editor.cursor_position = 2
         screen.synchronize()
         assert screen.documentation_line.sentence == (
-            'JSON OBJECT (1 keys) • Left: insertion unavailable in string or comment • Right: no menu'
+            'JSON OBJECT (1 keys) • Left: insertion unavailable in string or comment • Right: menu'
         )
         _click_history_presentation(screen, root)
         assert listener.history.rows == before
@@ -3958,7 +4021,7 @@ async def test_http_screen_json_documentation_chip_and_modal_precedence(tmp_path
         editor.cursor_position = 1
         screen.synchronize()
         assert screen.documentation_line.sentence == (
-            'JSON OBJECT (1 keys) • Left: move cursor to Python expression position to insert • Right: no menu'
+            'JSON OBJECT (1 keys) • Left: move cursor to Python expression position to insert • Right: menu'
         )
         _click_history_presentation(screen, root)
         assert listener.history.rows == before
