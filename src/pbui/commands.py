@@ -20,6 +20,7 @@ from typing import Protocol
 
 from atproto import Client, Request
 import pandas as pd
+import yfinance as yf
 
 from pbui import bsky
 from pbui.pandas_inspector import (
@@ -73,6 +74,7 @@ from pbui.http import (
 from pbui.text import HistoryRow, LiteralFragment, logical_presentation_text, truncate_display
 from pbui.repl import PythonEvaluator, ValueClasses, ValueTranslator
 from pbui.records import to_dataframe, to_json_records
+from pbui.ticker import production_history
 from pbui.transcript import CommandInput, MenuActionInput, PythonInput, append_input
 from pbui.tutorial import (
     TutorialCard, TutorialExample, TutorialStack, TutorialTarget,
@@ -403,6 +405,7 @@ class HeadlessListener:
         username_lookup: Callable[[int], object] | None = None,
         get_transport: GetTransport = production_get,
         bsky_client: object | None = None,
+        ticker_history: Callable[[yf.Ticker], pd.DataFrame] = production_history,
     ) -> None:
         normalized_cwd = filesystem.abspath(starting_cwd)
         cwd_stat = filesystem.stat(normalized_cwd)
@@ -417,6 +420,9 @@ class HeadlessListener:
             raise TypeError("GET transport must be callable")
         self._get_transport = get_transport
         self._bsky_client = bsky_client
+        if not callable(ticker_history):
+            raise TypeError("ticker history must be callable")
+        self._ticker_history = ticker_history
         self._http_json_states: dict[int, tuple[bool, object]] = {}
         self._username_lookup = (
             _production_username_lookup
@@ -475,6 +481,7 @@ class HeadlessListener:
         self._repl.classes.register(bsky.BlockedPost, lambda _value: "blocked post")
         self._repl.classes.register(bsky.ProfileViewDetailed, bsky.profile_row)
         self._repl.classes.register(bsky.AuthorFeedResponse, bsky.feed_row)
+        self._repl.classes.register(yf.Ticker, lambda value: f"Ticker {value.ticker}")
         self._repl.on_value_presented = self._on_value_presented
         self._translators = TranslatorTable()
         for presentation_type in (
@@ -932,6 +939,21 @@ class HeadlessListener:
     ) -> None:
         self._repl.classes.register(cls, printer, translators)
 
+    @grouped_operation
+    def run_ticker_history(self, presentation: Presentation | None) -> Presentation | None:
+        """Append history for one retained ticker Value, using the injected seam."""
+
+        if (
+            presentation is None
+            or presentation.type is not self._types.value
+            or self._history.get_presentation(presentation.id) is not presentation
+            or not isinstance(presentation.value, yf.Ticker)
+        ):
+            return None
+        return self._repl.invoke_resolved_translator(
+            self._ticker_history, presentation.value
+        )
+
     def _retained_pandas_value(
         self, presentation: Presentation | None, cls: type
     ) -> object | None:
@@ -1190,6 +1212,8 @@ class HeadlessListener:
         bsky_actions = self._bsky_translators(value)
         if bsky_actions:
             return bsky_actions
+        if isinstance(value, yf.Ticker):
+            return (ValueTranslator("history", self._ticker_history),)
         if type(value) is GetRequest:
             return (ValueTranslator("perform", self._perform_http),)
         if type(value) is HttpResponse:

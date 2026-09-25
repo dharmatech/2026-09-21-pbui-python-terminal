@@ -180,6 +180,7 @@ def test_dependency_metadata_and_terminal_import_boundary():
         "sympy>=1.14.0",
         "textual>=8.2.8",
         "wcwidth>=0.8.4",
+        "yfinance==1.7.0",
     ]
     assert development == ["pytest>=9.1.1", "pytest-asyncio>=1.4.0"]
     assert metadata["project"]["scripts"] == {"pbui": "pbui.terminal:main"}
@@ -3141,6 +3142,62 @@ async def test_pandas_screen_preview_hits_composition_and_documentation(tmp_path
         _click_history_presentation(screen, column)
         assert len(listener.history.rows) == count
         assert listener.pending_request is not None
+
+
+@pytest.mark.asyncio
+async def test_ticker_screen_hover_menu_history_and_frame_preview(tmp_path):
+    import yfinance as yf
+
+    class FixtureTicker(yf.Ticker):
+        def __init__(self):
+            self.ticker = "AAPL"
+
+    ticker = FixtureTicker()
+    frame = pd.DataFrame(
+        {"Close": [123.0, 124.0]},
+        index=pd.DatetimeIndex(["2026-09-21", "2026-09-22"], name="Date"),
+    )
+    calls = []
+
+    def history(value):
+        calls.append(value)
+        return frame
+
+    listener = make_listener(tmp_path, ticker_history=history)
+    listener.python_namespace["ticker"] = ticker
+    listener.submit("ticker")
+    source = [p for p in listener.history.presentations if p.type is listener.types.value][-1]
+    app = PbuiApp(listener)
+    async with app.run_test(size=(90, 14)):
+        screen = app.screen
+        surface = screen.history_surface
+        interval = source.intervals[0]
+        surface.on_mouse_move(_mouse_event(
+            events.MouseMove, surface, interval.start_column,
+            interval.physical_row - int(surface.scroll_y),
+        ))
+        assert screen.documentation_line.sentence == (
+            "TICKER AAPL • Left: show • Right: menu"
+        )
+        assert calls == []
+        _click_history_presentation(screen, source, button=3)
+        assert screen.action_menu.target is source
+        assert screen.action_menu.labels == ("history",)
+        assert calls == []
+        _move_menu_index(screen.action_menu, 0)
+        assert screen.documentation_line.sentence == (
+            "MENU “history” ON TICKER AAPL • Left: apply • Right: no menu"
+        )
+        assert calls == []
+        _click_menu_label(screen.action_menu, "history")
+        assert calls == [ticker]
+        action_row, frame_row = listener.history.rows[-2:]
+        assert action_row.presentations[0].value.target is ticker
+        assert stored_row_text(frame_row) == "DataFrame 2×1"
+        result = frame_row.presentations[0]
+        assert result.value is frame
+        _click_history_presentation(screen, result)
+        assert "Close" in stored_row_text(listener.history.rows[-3])
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ dependencies = [
     "sympy>=1.14.0",
     "textual>=8.2.8",
     "wcwidth>=0.8.4",
+    "yfinance==1.7.0",
 ]
 
 [project.scripts]

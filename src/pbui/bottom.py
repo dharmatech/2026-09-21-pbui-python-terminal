@@ -7,6 +7,7 @@ import re
 
 import sympy
 import pandas as pd
+import yfinance as yf
 
 from pbui.commands import HeadlessListener
 from pbui.domain import (
@@ -143,6 +144,8 @@ def _target(listener: HeadlessListener, presentation: Presentation | None) -> st
         return f"ACTION “{escape_display(presentation.value.label)}”"
     if kind == "Value":
         value = presentation.value
+        if isinstance(value, yf.Ticker):
+            return f"TICKER {escape_display(str(value.ticker))}"
         if isinstance(value, pd.DataFrame):
             return "DATAFRAME"
         if isinstance(value, pd.Series):

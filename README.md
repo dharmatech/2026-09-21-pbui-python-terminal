@@ -39,15 +39,19 @@ it, its environment, and its dependencies with uv only.
 | [`bsky`](docs/design/implementation/bsky/README.md) | Public Bluesky posts and profiles as `atproto` objects | Implemented through bsky 002 |
 | [`pandas`](docs/design/implementation/pandas/README.md) | DataFrame and Series summaries, a snapshot table, and row or column extraction | Implemented through pandas 001 |
 | [`records`](docs/design/implementation/records/README.md) | JSON records become a DataFrame, and a DataFrame becomes JSON records | Implemented through records 001 |
+| [`ticker`](docs/design/implementation/ticker/README.md) | A yfinance ticker and its daily price history as a DataFrame | Implemented through ticker 001 |
 
 A new discussion should read [`AGENTS.md`](AGENTS.md). The listener,
 listings, REPL, chips, SymPy, transcript, popup, HTTP, tutorial,
-recall, completion, sections, bsky, pandas, and records specifications are
-the law for the program as it stands. Bottom is implemented through bottom 002.
+recall, completion, sections, bsky, pandas, records, and ticker
+specifications are the law for the program as it stands. Bottom is implemented
+through bottom 002.
 Recall is implemented through recall 001. Completion is implemented through
 completion 002. The sections series is implemented through sections 001.
 The bsky series is implemented through bsky 002, the pandas series
 through pandas 001, and the records series through records 001. The
+[`ticker`](docs/design/implementation/ticker/README.md) specification is
+accepted and implemented through ticker 001. The
 [`history`](docs/design/implementation/history/README.md) specification
 is drafted and waiting for review. The
 [`transcript demo`](docs/design/implementation/transcript/demo.md) offers
