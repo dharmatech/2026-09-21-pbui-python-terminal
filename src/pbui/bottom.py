@@ -6,6 +6,7 @@ import os
 import re
 
 import sympy
+import pandas as pd
 
 from pbui.commands import HeadlessListener
 from pbui.domain import (
@@ -77,6 +78,10 @@ def _domain_kind(listener: HeadlessListener, presentation: Presentation | None) 
             return kind
     if presentation_type is types.value:
         return "Value"
+    if presentation_type is types.pandas_column and isinstance(value, pd.Series):
+        return "PandasColumn"
+    if presentation_type is types.pandas_row and isinstance(value, pd.DataFrame):
+        return "PandasRow"
     if presentation_type is types.text:
         return "Text"
     if presentation_type is types.error:
@@ -138,6 +143,10 @@ def _target(listener: HeadlessListener, presentation: Presentation | None) -> st
         return f"ACTION “{escape_display(presentation.value.label)}”"
     if kind == "Value":
         value = presentation.value
+        if isinstance(value, pd.DataFrame):
+            return "DATAFRAME"
+        if isinstance(value, pd.Series):
+            return "SERIES"
         if type(value) is GetRequest:
             return f"GET REQUEST “{escape_display(value.url)}”"
         if type(value) is HttpResponse:
@@ -159,6 +168,10 @@ def _target(listener: HeadlessListener, presentation: Presentation | None) -> st
         return f"TUTORIAL {direction} “{escape_display(value.destination.title)}”"
     if kind == "TutorialTry":
         return "TUTORIAL TRY"
+    if kind == "PandasColumn":
+        return "PANDAS COLUMN"
+    if kind == "PandasRow":
+        return "PANDAS ROW"
     return kind.upper()
 
 
@@ -278,6 +291,14 @@ def format_documentation(
             and 42 <= logical_column < 90 and display_width(member.command) > 48
         ):
             return _clauses(target + " (command truncated)", "show full command", right)
+    if kind == "PandasColumn":
+        return _clauses(target, "take column", right)
+    if kind == "PandasRow":
+        return _clauses(target, "take row", right)
+    if kind == "Value" and isinstance(presentation.value, pd.DataFrame):
+        return _clauses(target, "show frame preview", right)
+    if kind == "Value" and isinstance(presentation.value, pd.Series):
+        return _clauses(target, "list values", right)
     if kind in {"File", "Directory", "Process", "Value"}:
         if type(presentation.value) in {JsonObject, JsonArray}:
             return _clauses(target, "list members", right)

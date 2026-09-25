@@ -38,6 +38,8 @@ class DomainTypes:
     directory_listing: PresentationType
     process_listing: PresentationType
     value: PresentationType
+    pandas_column: PresentationType
+    pandas_row: PresentationType
     python_input: PresentationType
     command_input: PresentationType
     menu_action_input: PresentationType
@@ -51,6 +53,9 @@ def register_domain_types(registry: PresentationTypeRegistry) -> DomainTypes:
 
     if not isinstance(registry, PresentationTypeRegistry):
         raise TypeError("registry must be a PresentationTypeRegistry")
+    # The original domain registry has a fixed public order. Preview hits use
+    # their own exact tokens while sharing the same drawing and history paths.
+    pandas_registry = PresentationTypeRegistry()
     return DomainTypes(
         file=registry.register("File"),
         directory=registry.register("Directory"),
@@ -60,6 +65,8 @@ def register_domain_types(registry: PresentationTypeRegistry) -> DomainTypes:
         directory_listing=registry.register("DirectoryListing"),
         process_listing=registry.register("ProcessListing"),
         value=registry.register("Value"),
+        pandas_column=pandas_registry.register("PandasColumn"),
+        pandas_row=pandas_registry.register("PandasRow"),
         python_input=registry.register("PythonInput"),
         command_input=registry.register("CommandInput"),
         menu_action_input=registry.register("MenuActionInput"),
@@ -785,6 +792,9 @@ def register_domain_drawers(
     context.register_drawer(types.directory_listing, draw_directory_listing)
     context.register_drawer(types.process_listing, draw_process_listing)
     context.register_drawer(types.value, draw_value)
+    # Preview layout supplies the bounded label as the fragment's drawing.
+    context.register_drawer(types.pandas_column, lambda _value, _context: "")
+    context.register_drawer(types.pandas_row, lambda _value, _context: "")
     # Tutorial rows supply their own nested bracket labels and share one outer
     # presentation across rows. The type drawers intentionally add no text.
     for tutorial_type in (

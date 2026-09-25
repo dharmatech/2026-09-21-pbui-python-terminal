@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+import pandas as pd
+from atproto import models
 from rich.console import Console
 from textual import events
 from textual.geometry import Offset
@@ -16,6 +18,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Label, Static
 
 from pbui import terminal as terminal_module
+from pbui.chips import PythonChip
 from pbui.commands import HeadlessListener, InspectedProcess, RootedFilesystem
 from pbui.domain import DirectoryRef, FileRef, ProcessRef
 from pbui.http import GetResult, JsonArray, JsonObject
@@ -171,6 +174,8 @@ def test_dependency_metadata_and_terminal_import_boundary():
     dependencies = metadata["project"]["dependencies"]
     development = metadata["dependency-groups"]["dev"]
     assert dependencies == [
+        "atproto==0.0.72",
+        "pandas>=3.0.6",
         "rich>=15.0.0",
         "sympy>=1.14.0",
         "textual>=8.2.8",
@@ -1523,7 +1528,8 @@ async def test_completion_list_overlay_keys_click_and_menu(tmp_path):
         assert screen.completion_row(height - 1) == (
             screen.completion_candidates[9], True
         )
-        await pilot.press("tab", "tab", "tab")
+        tabs_to_wrap = len(screen.completion_candidates) - screen.completion_highlight
+        await pilot.press(*(["tab"] * tabs_to_wrap))
         assert screen.completion_highlight == 0
         assert screen.completion_window == 0
         await pilot.press(*("down",) * 9)
@@ -3021,6 +3027,137 @@ def _click_history_presentation(screen, presentation, *, button=1, chain=1, inte
             button=button, chain=chain,
         )
     )
+
+
+def _click_history_cell(screen, row, column, *, button=1, chain=1):
+    surface = screen.history_surface
+    physical = _first_physical_row(surface, row)
+    surface.scroll_to_row(physical)
+    y = physical - int(surface.scroll_y)
+    surface.on_click(_mouse_event(
+        events.Click, surface, column, y, button=button, chain=chain,
+    ))
+
+
+@pytest.mark.asyncio
+async def test_pandas_screen_preview_hits_composition_and_documentation(tmp_path):
+    listener = make_listener(tmp_path)
+    frame = pd.DataFrame([[1, pd.NA], [3, 4]], columns=["same", "same"], index=["a", "b"])
+    listener.python_namespace["frame"] = frame
+    listener.submit("frame")
+    source = next(p for p in listener.history.presentations if p.type is listener.types.value)
+    app = PbuiApp(listener)
+    async with app.run_test(size=(100, 16)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        assert format_documentation(listener, source) == (
+            "DATAFRAME • Left: show frame preview • Right: no menu"
+        )
+        _click_history_presentation(screen, source, button=3)
+        assert not screen.action_menu.is_open
+        _click_history_presentation(screen, source, chain=2)
+        assert len(listener.history.rows) == 2
+        _click_history_presentation(screen, source)
+        preview = listener.history.rows[-3:]
+        header, first_data, _ = preview
+        assert tuple(map(stored_row_text, preview)) == (
+            "index  same  same", "a      1     NA", "b      3     4",
+        )
+        assert len(header.presentations) == 2
+        column = header.presentations[1]
+        row = first_data.presentations[0]
+        assert format_documentation(listener, column) == (
+            "PANDAS COLUMN • Left: take column • Right: no menu"
+        )
+        assert format_documentation(listener, row) == (
+            "PANDAS ROW • Left: take row • Right: no menu"
+        )
+        assert surface.presentation_at_content_offset(
+            column.intervals[0].start_column, column.intervals[0].physical_row - int(surface.scroll_y)
+        ) is column
+        count = len(listener.history.rows)
+        _click_history_cell(screen, header, 5)  # corner padding/separator
+        assert len(listener.history.rows) == count
+        _click_history_cell(screen, first_data, 8)  # cell text, not row label
+        assert len(listener.history.rows) == count
+
+        _click_history_presentation(screen, column)
+        series_value = listener.history.rows[-1].presentations[0]
+        assert type(series_value.value) is pd.Series
+        assert series_value.value is column.value
+        assert listener.python_namespace["_"] is column.value
+        assert format_documentation(listener, series_value) == (
+            "SERIES • Left: list values • Right: no menu"
+        )
+        _click_history_presentation(screen, series_value)
+        assert tuple(map(stored_row_text, listener.history.rows[-2:])) == (
+            "[0]  NA", "[1]  4",
+        )
+        assert listener.python_namespace["_"] is column.value
+        _click_history_presentation(screen, row)
+        row_value = listener.history.rows[-1].presentations[0]
+        assert type(row_value.value) is pd.DataFrame
+        assert row_value.value is row.value
+        assert listener.python_namespace["_"] is row.value
+
+        listener.set_input_text("id(")
+        screen.synchronize()
+        count = len(listener.history.rows)
+        _click_history_cell(screen, header, 5)
+        _click_history_cell(screen, first_data, 8)
+        assert listener.python_pieces == ("id(",)
+        assert len(listener.history.rows) == count
+        _click_history_presentation(screen, column)
+        assert len(listener.history.rows) == count
+        assert any(isinstance(piece, PythonChip) and piece.value is column.value
+                   for piece in listener.python_pieces)
+        listener.cancel()
+        listener.set_input_text("'literal'")
+        listener.set_python_cursor(1)
+        screen.synchronize()
+        _click_history_presentation(screen, column)
+        assert listener.python_pieces == ("'literal'",)
+        listener.cancel()
+        _click_history_presentation(screen, column, button=3)
+        assert not screen.action_menu.is_open
+        screen.open_menu(column)
+        assert not screen.action_menu.is_open
+        screen.open_menu(source)
+        assert not screen.action_menu.is_open
+        surface.set_hovered_presentation(column)
+        await pilot.press("ctrl+o")
+        assert not screen.action_menu.is_open
+        listener.set_input_text(":ls")
+        screen.synchronize()
+        count = len(listener.history.rows)
+        _click_history_presentation(screen, column)
+        assert len(listener.history.rows) == count
+        listener.cancel()
+        listener.submit(":show")
+        screen.synchronize()
+        count = len(listener.history.rows)
+        _click_history_presentation(screen, column)
+        assert len(listener.history.rows) == count
+        assert listener.pending_request is not None
+
+
+@pytest.mark.asyncio
+async def test_pandas_screen_multiindex_has_no_axis_hits(tmp_path):
+    listener = make_listener(tmp_path)
+    frame = pd.DataFrame([[1]], index=pd.MultiIndex.from_tuples([("a", 1)]), columns=["c"])
+    listener.python_namespace["frame"] = frame
+    listener.submit("frame")
+    source = next(p for p in listener.history.presentations if p.type is listener.types.value)
+    app = PbuiApp(listener)
+    async with app.run_test(size=(100, 12)):
+        screen = app.screen
+        _click_history_presentation(screen, source)
+        rows = listener.history.rows[-2:]
+        assert all(row.presentations == () for row in rows)
+        count = len(listener.history.rows)
+        _click_history_cell(screen, rows[0], 7)
+        _click_history_cell(screen, rows[1], 0)
+        assert len(listener.history.rows) == count
 
 
 @pytest.mark.asyncio
@@ -4924,3 +5061,177 @@ async def test_tutorial_http_screen_route_controls_and_documentation(tmp_path):
         assert not screen.action_menu.is_open
         assert open_target(browse, "Up: HTTP").value is section.value
         assert open_target(section, "Up: Contents").value is contents.value
+
+
+@pytest.mark.asyncio
+async def test_bsky_screen_post_graph_profile_chip_and_scrolling(tmp_path):
+    stamp = "2024-01-01T00:00:00Z"
+    cid = "bafyreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"
+    author = models.AppBskyActorDefs.ProfileViewBasic(
+        did="did:plc:alice", handle="alice.example"
+    )
+
+    def post(text, rkey):
+        return models.AppBskyFeedDefs.PostView(
+            author=author, cid=cid, indexed_at=stamp,
+            record=models.AppBskyFeedPost.Record(created_at=stamp, text=text),
+            uri=f"at://did:plc:alice/app.bsky.feed.post/{rkey}",
+        )
+
+    nested = models.AppBskyFeedDefs.ThreadViewPost(post=post("nested text", "nested"))
+    reply = models.AppBskyFeedDefs.ThreadViewPost(
+        post=post("reply text", "reply"), replies=[nested]
+    )
+    parent = models.AppBskyFeedDefs.ThreadViewPost(post=post("parent text", "parent"))
+    subject = models.AppBskyFeedDefs.ThreadViewPost(
+        post=post("source text", "source"), parent=parent, replies=[reply]
+    )
+    response = models.AppBskyFeedGetPostThread.Response(thread=subject)
+    profile = models.AppBskyActorDefs.ProfileViewDetailed(
+        did=author.did, handle=author.handle, display_name="Alice"
+    )
+    feed_post = post("feed text", "feed")
+    feed = models.AppBskyFeedGetAuthorFeed.Response(
+        feed=[models.AppBskyFeedDefs.FeedViewPost(post=feed_post)]
+    )
+
+    class FakeBsky:
+        def __init__(self):
+            self.calls = []
+
+        def get_profile(self, actor):
+            self.calls.append(("profile", actor))
+            return profile
+
+        def get_author_feed(self, actor, limit=20):
+            self.calls.append(("feed", actor, limit))
+            return feed
+
+        def get_post_thread(self, uri):
+            pytest.fail(f"unexpected thread fetch: {uri}")
+
+    client = FakeBsky()
+    listener = make_listener(tmp_path, bsky_client=client)
+    listener.python_namespace["thread"] = response
+    listener.submit("thread")
+    source_row = listener.history.rows[-1]
+    source = source_row.presentations[0]
+    assert source.value is response
+    app = PbuiApp(listener)
+
+    async with app.run_test(size=(70, 12)) as pilot:
+        screen = app.screen
+        surface = screen.history_surface
+        editor = screen.command_input
+        interval = source.intervals[0]
+        assert surface.current_layout.rows[interval.physical_row].text == (
+            "  alice.example: source text"
+        )
+        x = interval.start_column
+        y = interval.physical_row - int(surface.scroll_y)
+        assert surface.presentation_at_content_offset(x, y) is source
+        surface.on_mouse_move(_mouse_event(events.MouseMove, surface, x, y))
+        assert screen.documentation_line.sentence == (
+            "PYTHON VALUE • Left: show • Right: menu"
+        )
+        underscore = listener.python_namespace["_"]
+        _click_history_presentation(screen, source)
+        assert listener.history.rows[-2] is source_row
+        assert listener.history.rows[-1].presentations[0].value == "source text"
+        assert listener.python_namespace["_"] is underscore is response
+        assert listener.input_text == ""
+
+        _click_history_presentation(screen, source, button=3)
+        menu = screen.action_menu
+        assert menu.target is source
+        assert menu.labels == ("author", "replies", "parent")
+        _move_menu_index(menu, 1)
+        assert screen.documentation_line.sentence == (
+            "MENU “replies” ON PYTHON VALUE • Left: apply • Right: no menu"
+        )
+        before_values = [
+            p for p in listener.history.presentations if p.type is listener.types.value
+        ]
+        _click_menu_label(menu, "replies")
+        new_values = [
+            p for p in listener.history.presentations if p.type is listener.types.value
+        ][len(before_values):]
+        assert len(new_values) == 1
+        reply_target = new_values[0]
+        assert reply_target.value is reply
+        reply_interval = reply_target.intervals[0]
+        assert surface.current_layout.rows[reply_interval.physical_row].text == (
+            "  alice.example: reply text"
+        )
+        surface.scroll_to_row(reply_interval.physical_row)
+        reply_y = reply_interval.physical_row - int(surface.scroll_y)
+        assert surface.presentation_at_content_offset(
+            reply_interval.start_column, reply_y
+        ) is reply_target
+        assert all(p.value is not nested for p in new_values)
+        _click_history_presentation(screen, reply_target)
+        assert listener.history.rows[-1].presentations[0].value == "reply text"
+        assert listener.python_namespace["_"] is reply
+
+        _click_history_presentation(screen, source, button=3)
+        assert screen.action_menu.labels == ("author", "replies", "parent")
+        _click_menu_label(screen.action_menu, "author")
+        assert client.calls == [("profile", author.did)]
+        profile_target = listener.history.rows[-1].presentations[0]
+        assert profile_target.value is profile
+        assert surface.current_layout.rows[profile_target.intervals[0].physical_row].text == (
+            "  Alice — alice.example"
+        )
+        _click_history_presentation(screen, profile_target, button=3)
+        assert screen.action_menu.labels == ("posts",)
+        _click_menu_label(screen.action_menu, "posts")
+        assert client.calls == [
+            ("profile", author.did), ("feed", profile.did, 20)
+        ]
+        feed_target = listener.history.rows[-1].presentations[0]
+        assert feed_target.value is feed.feed[0].post is feed_post
+        assert surface.current_layout.rows[feed_target.intervals[0].physical_row].text == (
+            "  alice.example: feed text"
+        )
+
+        listener.submit(":rm")
+        screen.synchronize()
+        before_rows = listener.history.rows
+        _click_history_presentation(screen, source)
+        assert listener.pending_request is not None
+        assert listener.history.rows == before_rows
+        await pilot.press("escape")
+
+        listener.set_input_text("id()")
+        editor.cursor_position = 3
+        screen.synchronize()
+        _click_history_presentation(screen, source)
+        assert listener.history.rows == before_rows
+        assert any(
+            isinstance(piece, PythonChip) and piece.value is response
+            for piece in listener.python_pieces
+        )
+        assert listener.python_namespace["_"] is feed_post
+        listener.cancel()
+
+        listener.set_input_text("len([])")
+        editor.cursor_position = 5
+        screen.synchronize()
+        saved_pieces = listener.python_pieces
+        saved_cursor = listener.python_cursor
+        _click_history_presentation(screen, source, button=3)
+        _click_menu_label(screen.action_menu, "replies")
+        assert listener.python_pieces == saved_pieces
+        assert listener.python_cursor == saved_cursor
+        assert editor.cursor_position == saved_cursor
+        listener.cancel()
+
+        _append_plain_rows(listener, 18)
+        screen.synchronize(reveal_newest=True)
+        assert source.intervals[0].physical_row < int(surface.scroll_y)
+        surface.scroll_to_row(source.intervals[0].physical_row)
+        old_y = source.intervals[0].physical_row - int(surface.scroll_y)
+        assert surface.presentation_at_content_offset(
+            source.intervals[0].start_column, old_y
+        ) is source
+        assert source.value is response

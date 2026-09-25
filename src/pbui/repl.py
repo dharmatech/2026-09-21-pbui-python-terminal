@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import sympy
+import pandas as pd
 
+from pbui import bsky
 from pbui.chips import Piece, splice
 from pbui.domain import escape_display
 from pbui.substrate import (
@@ -67,11 +69,15 @@ class ValueClasses:
             raise TypeError("translators need a label and callable function")
         self._entries[cls] = ValueRegistration(printer, entries)
 
-    def lookup(self, value: Any) -> ValueRegistration | None:
+    def registered_class(self, value: Any) -> type | None:
         for cls in type(value).__mro__:
             if cls in self._entries:
-                return self._entries[cls]
+                return cls
         return None
+
+    def lookup(self, value: Any) -> ValueRegistration | None:
+        cls = self.registered_class(value)
+        return None if cls is None else self._entries[cls]
 
     def translators_for(self, value: Any) -> tuple[ValueTranslator, ...]:
         registration = self.lookup(value)
@@ -183,6 +189,14 @@ class PythonEvaluator:
                 ValueTranslator("factor", sympy.factor),
             ),
         )
+        self.classes.register(pd.DataFrame, lambda value: f"DataFrame {len(value)}×{len(value.columns)}")
+        self.classes.register(
+            pd.Series,
+            lambda value: (
+                f"Series {len(value)} {value.name} {value.dtype}"
+                if value.name is not None else f"Series {len(value)} {value.dtype}"
+            ),
+        )
         self._history = history
         self._context = context
         self._value_type = value_type
@@ -245,7 +259,8 @@ class PythonEvaluator:
         self.display_value(value)
 
     def display_value(
-        self, value: Any, *, include_none: bool = False, update_last: bool = True
+        self, value: Any, *, include_none: bool = False, update_last: bool = True,
+        row_printer: Callable[[Any], str] | None = None,
     ) -> Presentation | None:
         if value is None and not include_none:
             return None
@@ -255,7 +270,11 @@ class PythonEvaluator:
         self._history.append(row)
         presentation = row.presentations[0]
         try:
-            self._replace_value_row(row, presentation, self.value_row_text(value))
+            drawing = (
+                self.value_row_text(value) if row_printer is None
+                else truncate_display(escape_display(row_printer(value)), 120)
+            )
+            self._replace_value_row(row, presentation, drawing)
         except BaseException as error:
             self._append_error(_execution_error(error, "", self._command_names))
         if self.on_value_presented is not None:
@@ -265,12 +284,21 @@ class PythonEvaluator:
     def value_row_text(self, value: Any) -> str:
         """Return the normal safe, one-line drawing for a Value."""
 
+        registered_class = self.classes.registered_class(value)
+        if registered_class is bsky.ThreadResponse and not isinstance(
+            value.thread, (bsky.ThreadViewPost, bsky.NotFoundPost, bsky.BlockedPost)
+        ):
+            return self._generic_value_row(value)
         registration = self.classes.lookup(value)
         if registration is None:
-            kind = truncate_display(escape_display(type(value).__name__), 64)
-            representation = truncate_display(escape_display(_bounded_repr(value)), 96)
-            return f"{kind} {representation}"
+            return self._generic_value_row(value)
         return truncate_display(escape_display(registration.printer(value)), 120)
+
+    @staticmethod
+    def _generic_value_row(value: Any) -> str:
+        kind = truncate_display(escape_display(type(value).__name__), 64)
+        representation = truncate_display(escape_display(_bounded_repr(value)), 96)
+        return f"{kind} {representation}"
 
     def _replace_value_row(
         self, row: HistoryRow, presentation: Presentation, drawing: str
@@ -327,7 +355,15 @@ class PythonEvaluator:
             return False
         value = presentation.value
         try:
-            if isinstance(value, sympy.Expr):
+            if bsky.visible_post(value):
+                lines = bsky.post_text(value).split("\n")
+                detail_rows = [
+                    truncate_display(escape_display(line), 120)
+                    for line in lines[:24]
+                ]
+                if len(lines) > 24:
+                    detail_rows.append(f"… ({len(lines) - 24} more lines)")
+            elif isinstance(value, sympy.Expr):
                 pretty_lines = sympy.pretty(
                     value, use_unicode=True, wrap_line=False
                 ).split("\n")

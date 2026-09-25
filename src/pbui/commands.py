@@ -18,6 +18,13 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Protocol
 
+from atproto import Client, Request
+import pandas as pd
+
+from pbui import bsky
+from pbui.pandas_inspector import (
+    FramePreview, capture_frame, frame_preview_rows, list_series_values,
+)
 from pbui.domain import (
     DirectoryListing,
     DirectoryListingMember,
@@ -379,6 +386,8 @@ class HeadlessListener:
         "only",
         "widen",
         "get",
+        "post",
+        "profile",
         "tutorial",
     )
     VIEW_COMMAND_NAMES = frozenset({"sort", "narrow", "only", "widen"})
@@ -392,6 +401,7 @@ class HeadlessListener:
         history_max_rows: int = PresentationHistory.MAX_LOGICAL_ROWS,
         username_lookup: Callable[[int], object] | None = None,
         get_transport: GetTransport = production_get,
+        bsky_client: object | None = None,
     ) -> None:
         normalized_cwd = filesystem.abspath(starting_cwd)
         cwd_stat = filesystem.stat(normalized_cwd)
@@ -405,6 +415,7 @@ class HeadlessListener:
         if not callable(get_transport):
             raise TypeError("GET transport must be callable")
         self._get_transport = get_transport
+        self._bsky_client = bsky_client
         self._http_json_states: dict[int, tuple[bool, object]] = {}
         self._username_lookup = (
             _production_username_lookup
@@ -456,6 +467,13 @@ class HeadlessListener:
         self._repl.classes.register(
             JsonArray, lambda value: f"▸ JsonArray ({len(value)} elements)"
         )
+        self._repl.classes.register(bsky.ThreadResponse, bsky.thread_response_row)
+        self._repl.classes.register(bsky.ThreadViewPost, bsky.post_row)
+        self._repl.classes.register(bsky.PostView, bsky.post_row)
+        self._repl.classes.register(bsky.NotFoundPost, lambda _value: "unavailable post")
+        self._repl.classes.register(bsky.BlockedPost, lambda _value: "blocked post")
+        self._repl.classes.register(bsky.ProfileViewDetailed, bsky.profile_row)
+        self._repl.classes.register(bsky.AuthorFeedResponse, bsky.feed_row)
         self._repl.on_value_presented = self._on_value_presented
         self._translators = TranslatorTable()
         for presentation_type in (
@@ -847,7 +865,7 @@ class HeadlessListener:
         self._record_action(replace(action))
         if action.kind == "translator":
             self._repl.invoke_resolved_translator(action.operation, action.target)
-        elif action.kind == "http":
+        elif action.kind in {"http", "bsky"}:
             action.operation(action.target)
         elif action.kind == "member":
             action.operation(action.target)
@@ -913,12 +931,264 @@ class HeadlessListener:
     ) -> None:
         self._repl.classes.register(cls, printer, translators)
 
+    def _retained_pandas_value(
+        self, presentation: Presentation | None, cls: type
+    ) -> object | None:
+        if (
+            presentation is None
+            or presentation.type is not self._types.value
+            or self._history.get_presentation(presentation.id) is not presentation
+            or not isinstance(presentation.value, cls)
+        ):
+            return None
+        return presentation.value
+
+    def capture_pandas_frame(self, presentation: Presentation | None) -> FramePreview | None:
+        """Capture a retained frame without changing history or the last value."""
+
+        frame = self._retained_pandas_value(presentation, pd.DataFrame)
+        return None if frame is None else capture_frame(frame)
+
+    def list_pandas_series(self, presentation: Presentation | None) -> tuple[str, ...] | None:
+        """Format the visible values of a retained series without appending."""
+
+        series = self._retained_pandas_value(presentation, pd.Series)
+        return None if series is None else list_series_values(series)
+
+    def present_pandas_copy(self, value: object) -> Presentation | None:
+        """Append a cached positional pandas copy as an ordinary Value."""
+
+        if not isinstance(value, (pd.DataFrame, pd.Series)):
+            return None
+        return self._repl.display_value(value)
+
+    @grouped_operation
+    def show_pandas_frame(self, presentation: Presentation) -> bool:
+        """Append a complete captured preview for one retained frame Value."""
+
+        if self._retained_pandas_value(presentation, pd.DataFrame) is None:
+            return False
+        try:
+            preview = self.capture_pandas_frame(presentation)
+            assert preview is not None
+            rows = frame_preview_rows(preview, self._types, self._contexts.standalone)
+        except Exception as error:
+            self._append_error(str(error))
+            return True
+        for row in rows:
+            self._history.append(row)
+        return True
+
+    @grouped_operation
+    def show_pandas_series(self, presentation: Presentation) -> bool:
+        """Append a fully formatted, literal list of retained series values."""
+
+        if self._retained_pandas_value(presentation, pd.Series) is None:
+            return False
+        try:
+            lines = self.list_pandas_series(presentation)
+            assert lines is not None
+            rows = tuple(self._contexts.standalone.row(line) for line in lines)
+        except Exception as error:
+            self._append_error(str(error))
+            return True
+        for row in rows:
+            self._history.append(row)
+        return True
+
+    def take_pandas_axis(self, presentation: Presentation) -> bool:
+        """Present the exact cached copy in one retained preview hit."""
+
+        if self._history.get_presentation(presentation.id) is not presentation:
+            return False
+        if presentation.type is self._types.pandas_column and isinstance(presentation.value, pd.Series):
+            return self.present_pandas_copy(presentation.value) is not None
+        if presentation.type is self._types.pandas_row and isinstance(presentation.value, pd.DataFrame):
+            return self.present_pandas_copy(presentation.value) is not None
+        return False
+
+    def present_bsky_feed(
+        self, feed: bsky.AuthorFeedResponse, *, handle: str | None = None
+    ) -> Presentation:
+        """Retain an author feed with optional caller-owned row metadata."""
+
+        if not isinstance(feed, bsky.AuthorFeedResponse):
+            raise TypeError("feed must be an author-feed response")
+        result = self._repl.display_value(
+            feed, row_printer=lambda value: bsky.feed_row(value, handle=handle)
+        )
+        assert result is not None
+        return result
+
+    def _bsky_translators(self, value: object) -> tuple[ValueTranslator, ...]:
+        registered_class = self._repl.classes.registered_class(value)
+        if registered_class not in {
+            bsky.ThreadResponse, bsky.ThreadViewPost, bsky.PostView,
+            bsky.ProfileViewDetailed, bsky.AuthorFeedResponse,
+        }:
+            return ()
+        node = bsky.thread_node(value)
+        if isinstance(node, bsky.ThreadViewPost):
+            actions = [
+                ValueTranslator("author", self._bsky_author),
+                ValueTranslator("replies", self._bsky_replies),
+            ]
+            if node.parent is not None:
+                actions.append(ValueTranslator("parent", self._bsky_parent))
+            return tuple(actions)
+        if isinstance(value, bsky.PostView):
+            return (
+                ValueTranslator("author", self._bsky_author),
+                ValueTranslator("replies", self._bsky_replies),
+            )
+        if isinstance(value, (bsky.ProfileViewDetailed, bsky.AuthorFeedResponse)):
+            return (ValueTranslator("posts", self._bsky_posts),)
+        return ()
+
+    def _client_for_bsky(self) -> object:
+        if self._bsky_client is None:
+            self._bsky_client = Client(
+                base_url="https://public.api.bsky.app", request=Request(timeout=15.0)
+            )
+        return self._bsky_client
+
+    @staticmethod
+    def _checked_bsky_profile(value: object) -> bsky.ProfileViewDetailed:
+        if not isinstance(value, bsky.ProfileViewDetailed):
+            raise TypeError("expected a detailed Bluesky profile")
+        bsky.profile_row(value)
+        return value
+
+    @staticmethod
+    def _checked_bsky_thread(
+        value: object, *, allow_unknown_subject: bool = False
+    ) -> bsky.ThreadResponse:
+        if not isinstance(value, bsky.ThreadResponse):
+            raise TypeError("expected a Bluesky post thread response")
+        subject = value.thread
+        if isinstance(subject, bsky.ThreadViewPost):
+            bsky.post_row(subject)
+        elif not isinstance(subject, (bsky.NotFoundPost, bsky.BlockedPost)):
+            if not allow_unknown_subject:
+                raise TypeError("unexpected Bluesky thread subject")
+        return value
+
+    @staticmethod
+    def _checked_bsky_feed(value: object) -> bsky.AuthorFeedResponse:
+        if not isinstance(value, bsky.AuthorFeedResponse):
+            raise TypeError("expected a Bluesky author feed response")
+        if not isinstance(value.feed, (list, tuple)):
+            raise TypeError("invalid Bluesky author feed")
+        for entry in value.feed[:20]:
+            if not isinstance(entry, bsky.FeedViewPost) or not isinstance(
+                entry.post, bsky.PostView
+            ):
+                raise TypeError("invalid Bluesky feed entry")
+            bsky.post_row(entry.post)
+        return value
+
+    @staticmethod
+    def _checked_bsky_replies(node: bsky.ThreadViewPost) -> None:
+        if node.replies is not None and not isinstance(node.replies, (list, tuple)):
+            raise TypeError("invalid Bluesky replies")
+        for reply in (node.replies or ())[:20]:
+            if isinstance(reply, bsky.ThreadViewPost):
+                bsky.post_row(reply)
+            elif not isinstance(reply, (bsky.NotFoundPost, bsky.BlockedPost)):
+                raise TypeError("invalid Bluesky reply")
+
+    def _bsky_fetch_error(self, error: Exception) -> None:
+        self._append_error(f"Bluesky request failed: {type(error).__name__}: {error}")
+
+    def _bsky_author(self, value: object) -> Presentation | None:
+        try:
+            author = bsky.post_view(value).author
+            if type(author) is bsky.ProfileViewDetailed:
+                return self._repl.display_value(author)
+            profile = self._checked_bsky_profile(
+                self._client_for_bsky().get_profile(author.did)
+            )
+        except Exception as error:
+            self._bsky_fetch_error(error)
+            return None
+        return self._repl.display_value(profile)
+
+    def _append_bsky_replies(
+        self, node: bsky.ThreadViewPost | None
+    ) -> Presentation | None:
+        replies = node.replies or () if node is not None else ()
+        if not replies:
+            self._append_text("no replies")
+            return None
+        result = None
+        for reply in replies[:20]:
+            result = self._repl.display_value(reply)
+        if len(replies) > 20:
+            self._history.append(
+                HistoryRow((LiteralFragment(f"… ({len(replies) - 20} more replies)"),))
+            )
+        return result
+
+    def _bsky_replies(self, value: object) -> Presentation | None:
+        node = bsky.thread_node(value)
+        if isinstance(node, bsky.ThreadViewPost):
+            return self._append_bsky_replies(node)
+        try:
+            if not isinstance(value, bsky.PostView):
+                raise TypeError("replies requires a visible post")
+            response = self._checked_bsky_thread(
+                self._client_for_bsky().get_post_thread(value.uri)
+            )
+            subject = response.thread
+            if isinstance(subject, bsky.ThreadViewPost):
+                self._checked_bsky_replies(subject)
+            else:
+                subject = None
+        except Exception as error:
+            self._bsky_fetch_error(error)
+            return None
+        return self._append_bsky_replies(subject)
+
+    def _bsky_parent(self, value: object) -> Presentation | None:
+        node = bsky.thread_node(value)
+        if not isinstance(node, bsky.ThreadViewPost) or node.parent is None:
+            return None
+        return self._repl.display_value(node.parent)
+
+    def _append_bsky_posts(
+        self, value: bsky.AuthorFeedResponse
+    ) -> Presentation | None:
+        if not value.feed:
+            self._append_text("no posts")
+            return None
+        result = None
+        for entry in value.feed[:20]:
+            result = self._repl.display_value(entry.post)
+        return result
+
+    def _bsky_posts(self, value: object) -> Presentation | None:
+        if isinstance(value, bsky.AuthorFeedResponse):
+            return self._append_bsky_posts(value)
+        try:
+            if not isinstance(value, bsky.ProfileViewDetailed):
+                raise TypeError("posts requires a detailed profile or author feed")
+            feed = self._checked_bsky_feed(
+                self._client_for_bsky().get_author_feed(value.did, limit=20)
+            )
+        except Exception as error:
+            self._bsky_fetch_error(error)
+            return None
+        return self._append_bsky_posts(feed)
+
     def python_translators_for(
         self, presentation: Presentation
     ) -> tuple[ValueTranslator, ...]:
         if presentation.presentation_type is not self._types.value:
             return ()
         value = presentation.value
+        bsky_actions = self._bsky_translators(value)
+        if bsky_actions:
+            return bsky_actions
         if type(value) is GetRequest:
             return (ValueTranslator("perform", self._perform_http),)
         if type(value) is HttpResponse:
@@ -941,15 +1211,16 @@ class HeadlessListener:
         ):
             raise ValueError("translator requires a retained Value presentation")
         translator = self.python_translators_for(presentation)[index]
+        bsky_action = bool(self._bsky_translators(presentation.value))
         http_action = translator.label in {"perform", "body"} and type(
             presentation.value
         ) in {GetRequest, HttpResponse}
         action = self._action_record(
             translator.label, translator.function, None, presentation,
-            "http" if http_action else "translator",
+            "bsky" if bsky_action else "http" if http_action else "translator",
         )
         self._record_action(action)
-        if http_action:
+        if bsky_action or http_action:
             return translator.function(presentation.value)
         return self._repl.invoke_resolved_translator(
             translator.function, presentation.value
@@ -1116,6 +1387,9 @@ class HeadlessListener:
             finally:
                 self._clear_attempt()
             return
+        if command_name in {"post", "profile"}:
+            self._submit_bsky_command(command_name, command_line, raw_tail)
+            return
         if command_name in self.VIEW_COMMAND_NAMES:
             self._submit_view_command(command_name, raw_argument, raw_tail)
             return
@@ -1166,6 +1440,32 @@ class HeadlessListener:
                 self._clear_attempt()
             return
         self._run_typed(command_name, item)
+
+    def _submit_bsky_command(
+        self, command_name: str, command_line: str, raw_tail: str
+    ) -> None:
+        self._record_command(raw_tail)
+        try:
+            start = len(command_line) - len(command_line.lstrip())
+            end = start + len(command_name)
+            argument = command_line[end + 1:] if end < len(command_line) else ""
+            if command_name == "post":
+                uri = bsky.post_uri(argument)
+                result = self._checked_bsky_thread(
+                    self._client_for_bsky().get_post_thread(uri),
+                    allow_unknown_subject=True,
+                )
+            else:
+                if not bsky.valid_actor(argument):
+                    raise ValueError("profile requires one valid handle or DID")
+                result = self._checked_bsky_profile(
+                    self._client_for_bsky().get_profile(argument)
+                )
+            self._repl.display_value(result)
+        except Exception as error:
+            self._bsky_fetch_error(error)
+        finally:
+            self._clear_attempt()
 
     def _acceptable_types(self, command_name: str) -> frozenset[PresentationType]:
         accepted = {
@@ -1327,9 +1627,15 @@ class HeadlessListener:
         if self._state.pending_request is not None:
             return self._state.select_presentation(presentation, label)
         if presentation.presentation_type is self._types.value:
+            if isinstance(presentation.value, pd.DataFrame):
+                return self.input_mode == "empty" and self.show_pandas_frame(presentation)
+            if isinstance(presentation.value, pd.Series):
+                return self.input_mode == "empty" and self.show_pandas_series(presentation)
             if type(presentation.value) in (JsonObject, JsonArray):
                 return self.dig_json(presentation)
             return self._repl.show_detail(presentation)
+        if presentation.type in (self._types.pandas_column, self._types.pandas_row):
+            return self.input_mode == "empty" and self.take_pandas_axis(presentation)
         translator = self._translators.lookup(presentation.presentation_type)
         if translator is None:
             return False

@@ -202,6 +202,8 @@ def test_composition_is_coherent_bounded_and_never_changes_process_cwd(tmp_path)
         "only",
         "widen",
         "get",
+        "post",
+        "profile",
         "tutorial",
     )
     assert listener.filesystem.allowed_root == str(tmp_path)

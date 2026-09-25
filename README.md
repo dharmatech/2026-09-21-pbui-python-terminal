@@ -36,13 +36,17 @@ it, its environment, and its dependencies with uv only.
 | [`recall`](docs/design/implementation/recall/README.md) | Up and Down bring earlier submissions back into the input row | Implemented through recall 001 |
 | [`completion`](docs/design/implementation/completion/README.md) | Tab completes commands, Python names, attributes, and imports | Implemented through completion 002 |
 | [`sections`](docs/design/implementation/sections/README.md) | Tutorial subjects: Listener, then SymPy, with Up to the parent | Implemented through sections 001 |
+| [`bsky`](docs/design/implementation/bsky/README.md) | Public Bluesky posts and profiles as `atproto` objects | Implemented through bsky 002 |
+| [`pandas`](docs/design/implementation/pandas/README.md) | DataFrame and Series summaries, a snapshot table, and row or column extraction | Implemented through pandas 001 |
 
 A new discussion should read [`AGENTS.md`](AGENTS.md). The listener,
 listings, REPL, chips, SymPy, transcript, popup, HTTP, tutorial,
-recall, completion, and sections specifications are the law for the program as
-it stands. Bottom is implemented through bottom 002. Recall is
-implemented through recall 001. Completion is implemented through
-completion 002. The sections series is implemented through sections 001. The
+recall, completion, sections, bsky, and pandas specifications are the law
+for the program as it stands. Bottom is implemented through bottom 002.
+Recall is implemented through recall 001. Completion is implemented through
+completion 002. The sections series is implemented through sections 001.
+The bsky series is implemented through bsky 002, and the pandas series
+through pandas 001. The
 [`history`](docs/design/implementation/history/README.md) specification
 is drafted and waiting for review. The
 [`transcript demo`](docs/design/implementation/transcript/demo.md) offers

@@ -8,6 +8,8 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "atproto==0.0.72",
+    "pandas>=3.0.6",
     "rich>=15.0.0",
     "sympy>=1.14.0",
     "textual>=8.2.8",
