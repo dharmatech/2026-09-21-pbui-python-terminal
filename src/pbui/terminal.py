@@ -186,6 +186,8 @@ def presentation_style(
     bold = False
     if kind == "Error":
         color = "red"
+    elif kind == "Candle":
+        color = "#00d787" if presentation.value.close >= presentation.value.open else "#ff5f5f"
     elif kind == "Directory":
         color = "#00afff"
     elif kind == "Process":

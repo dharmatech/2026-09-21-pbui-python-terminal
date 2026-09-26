@@ -23,6 +23,7 @@ import pandas as pd
 import yfinance as yf
 
 from pbui import bsky
+from pbui.chart import Candle, Chart, candle_detail, capture_chart, chart_rows
 from pbui.pandas_inspector import (
     FramePreview, capture_frame, frame_preview_rows, list_series_values,
 )
@@ -72,7 +73,7 @@ from pbui.http import (
     content_type_of, is_json_media_type, parse_json, production_get, validate_url,
 )
 from pbui.text import HistoryRow, LiteralFragment, logical_presentation_text, truncate_display
-from pbui.repl import PythonEvaluator, ValueClasses, ValueTranslator
+from pbui.repl import PythonEvaluator, ValueClasses, ValueTranslator, _execution_error
 from pbui.records import to_dataframe, to_json_records
 from pbui.ticker import production_history
 from pbui.transcript import CommandInput, MenuActionInput, PythonInput, append_input
@@ -436,6 +437,8 @@ class HeadlessListener:
         self._types = register_domain_types(self._registry)
         self._history = PresentationHistory(history_max_rows)
         self._contexts = make_domain_drawing_contexts(self._types)
+        self._contexts.standalone.register_drawer(self._types.chart, lambda _value, _context: "")
+        self._contexts.standalone.register_drawer(self._types.candle, lambda _value, _context: "")
         self._tutorial_stack = make_tutorial_stack()
         for input_type in (
             self._types.python_input,
@@ -757,6 +760,10 @@ class HeadlessListener:
         label = logical_presentation_text(self._history, presentation)
         if label is None or self.python_insertion_reason(presentation) != "valid":
             return False
+        if presentation.type is self._types.candle and type(presentation.value) is Candle:
+            label = f"Candle {presentation.value.date}"
+        elif presentation.type is self._types.chart and type(presentation.value) is Chart:
+            label = f"Ticker {escape_display(presentation.value.symbol)} chart"
         self._python_line.insert_chip(PythonChip(presentation.value, truncate_display(label, 32)))
         self._sync_python_text()
         return True
@@ -873,7 +880,7 @@ class HeadlessListener:
         self._record_action(replace(action))
         if action.kind == "translator":
             self._repl.invoke_resolved_translator(action.operation, action.target)
-        elif action.kind in {"http", "bsky"}:
+        elif action.kind in {"http", "bsky", "chart"}:
             action.operation(action.target)
         elif action.kind == "member":
             action.operation(action.target)
@@ -953,6 +960,38 @@ class HeadlessListener:
         return self._repl.invoke_resolved_translator(
             self._ticker_history, presentation.value
         )
+
+    @grouped_operation
+    def run_ticker_chart(self, presentation: Presentation | None) -> Presentation | None:
+        """Capture and append one chart for a currently retained ticker Value."""
+
+        if (
+            presentation is None
+            or presentation.type is not self._types.value
+            or self._history.get_presentation(presentation.id) is not presentation
+            or not isinstance(presentation.value, yf.Ticker)
+        ):
+            return None
+        return self._append_ticker_chart(presentation.value)
+
+    def _append_ticker_chart(self, ticker: yf.Ticker) -> Presentation | None:
+        """Append a chart from a saved ticker, independent of its source row."""
+
+        try:
+            frame = self._ticker_history(ticker)
+        except BaseException as error:
+            self._append_error(_execution_error(error, "", self.COMMAND_NAMES))
+            return None
+        try:
+            chart = capture_chart(ticker.ticker, frame)
+            rows = chart_rows(chart, self._types, self._contexts.standalone)
+        except (TypeError, ValueError, OverflowError):
+            self._append_text("no prices")
+            return None
+        for row in rows:
+            self._history.append(row)
+        self._repl.namespace["_"] = chart
+        return rows[0].presentations[0]
 
     def _retained_pandas_value(
         self, presentation: Presentation | None, cls: type
@@ -1213,7 +1252,10 @@ class HeadlessListener:
         if bsky_actions:
             return bsky_actions
         if isinstance(value, yf.Ticker):
-            return (ValueTranslator("history", self._ticker_history),)
+            return (
+                ValueTranslator("history", self._ticker_history),
+                ValueTranslator("candlestick", self._append_ticker_chart),
+            )
         if type(value) is GetRequest:
             return (ValueTranslator("perform", self._perform_http),)
         if type(value) is HttpResponse:
@@ -1244,15 +1286,16 @@ class HeadlessListener:
             raise ValueError("translator requires a retained Value presentation")
         translator = self.python_translators_for(presentation)[index]
         bsky_action = bool(self._bsky_translators(presentation.value))
+        chart_action = isinstance(presentation.value, yf.Ticker) and translator.label == "candlestick"
         http_action = translator.label in {"perform", "body"} and type(
             presentation.value
         ) in {GetRequest, HttpResponse}
         action = self._action_record(
             translator.label, translator.function, None, presentation,
-            "bsky" if bsky_action else "http" if http_action else "translator",
+            "chart" if chart_action else "bsky" if bsky_action else "http" if http_action else "translator",
         )
         self._record_action(action)
-        if bsky_action or http_action:
+        if chart_action or bsky_action or http_action:
             return translator.function(presentation.value)
         return self._repl.invoke_resolved_translator(
             translator.function, presentation.value
@@ -1658,6 +1701,13 @@ class HeadlessListener:
             return False
         if self._state.pending_request is not None:
             return self._state.select_presentation(presentation, label)
+        if presentation.type in (self._types.chart, self._types.candle):
+            if self._history.get_presentation(presentation.id) is not presentation:
+                return False
+            if presentation.type is self._types.candle:
+                self._show_candle(presentation.value)
+                return True
+            return False
         if presentation.presentation_type is self._types.value:
             if isinstance(presentation.value, pd.DataFrame):
                 return self.input_mode == "empty" and self.show_pandas_frame(presentation)
@@ -1673,6 +1723,10 @@ class HeadlessListener:
             return False
         translator(presentation.value)
         return True
+
+    @grouped_operation
+    def _show_candle(self, candle: Candle) -> None:
+        self._append_text(candle_detail(candle))
 
     def select_presentation(
         self, presentation: Presentation | None, label: str = ""

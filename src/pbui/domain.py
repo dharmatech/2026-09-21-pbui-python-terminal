@@ -38,6 +38,8 @@ class DomainTypes:
     directory_listing: PresentationType
     process_listing: PresentationType
     value: PresentationType
+    chart: PresentationType
+    candle: PresentationType
     pandas_column: PresentationType
     pandas_row: PresentationType
     python_input: PresentationType
@@ -56,6 +58,7 @@ def register_domain_types(registry: PresentationTypeRegistry) -> DomainTypes:
     # The original domain registry has a fixed public order. Preview hits use
     # their own exact tokens while sharing the same drawing and history paths.
     pandas_registry = PresentationTypeRegistry()
+    chart_registry = PresentationTypeRegistry()
     return DomainTypes(
         file=registry.register("File"),
         directory=registry.register("Directory"),
@@ -65,6 +68,8 @@ def register_domain_types(registry: PresentationTypeRegistry) -> DomainTypes:
         directory_listing=registry.register("DirectoryListing"),
         process_listing=registry.register("ProcessListing"),
         value=registry.register("Value"),
+        chart=chart_registry.register("Chart"),
+        candle=chart_registry.register("Candle"),
         pandas_column=pandas_registry.register("PandasColumn"),
         pandas_row=pandas_registry.register("PandasRow"),
         python_input=registry.register("PythonInput"),

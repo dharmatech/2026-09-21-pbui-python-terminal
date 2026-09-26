@@ -3182,7 +3182,7 @@ async def test_ticker_screen_hover_menu_history_and_frame_preview(tmp_path):
         assert calls == []
         _click_history_presentation(screen, source, button=3)
         assert screen.action_menu.target is source
-        assert screen.action_menu.labels == ("history",)
+        assert screen.action_menu.labels == ("history", "candlestick")
         assert calls == []
         _move_menu_index(screen.action_menu, 0)
         assert screen.documentation_line.sentence == (
@@ -3198,6 +3198,80 @@ async def test_ticker_screen_hover_menu_history_and_frame_preview(tmp_path):
         assert result.value is frame
         _click_history_presentation(screen, result)
         assert "Close" in stored_row_text(listener.history.rows[-3])
+
+
+@pytest.mark.asyncio
+async def test_ticker_candlestick_screen_menu_styles_and_hover(tmp_path):
+    import yfinance as yf
+
+    class FixtureTicker(yf.Ticker):
+        def __init__(self):
+            self.ticker = "AAPL"
+
+    ticker = FixtureTicker()
+    frame = pd.DataFrame(
+        {"Open": [10.0, 15.0], "High": [20.0, 20.0],
+         "Low": [0.0, 0.0], "Close": [15.0, 10.0]},
+        index=pd.DatetimeIndex(["2026-09-21", "2026-09-22"], name="Date"),
+    )
+    calls = []
+    listener = make_listener(tmp_path, ticker_history=lambda value: calls.append(value) or frame)
+    listener.python_namespace["ticker"] = ticker
+    listener.submit("ticker")
+    source = next(p for p in reversed(listener.history.presentations)
+                  if p.type is listener.types.value)
+    app = PbuiApp(listener)
+    async with app.run_test(size=(100, 26)):
+        screen = app.screen
+        surface = screen.history_surface
+        source_interval = source.intervals[0]
+        surface.on_mouse_move(_mouse_event(
+            events.MouseMove, surface, source_interval.start_column,
+            source_interval.physical_row - int(surface.scroll_y),
+        ))
+        assert calls == []
+        _click_history_presentation(screen, source, button=3)
+        assert screen.action_menu.labels == ("history", "candlestick")
+        _move_menu_index(screen.action_menu, 1)
+        assert screen.documentation_line.sentence == (
+            "MENU “candlestick” ON TICKER AAPL • Left: apply • Right: no menu"
+        )
+        assert calls == []
+        _click_menu_label(screen.action_menu, "candlestick")
+        assert calls == [ticker]
+        chart = next(p for p in reversed(listener.history.presentations)
+                     if p.type is listener.types.chart)
+        candles = [p for p in listener.history.presentations
+                   if p.type is listener.types.candle]
+        assert len(candles) == 2
+        assert [p.value.date for p in candles] == ["2026-09-21", "2026-09-22"]
+        assert [presentation_style(listener, p, None).color.name for p in candles] == [
+            "#00d787", "#ff5f5f",
+        ]
+        assert surface.current_layout.width >= 62
+        plot_y = candles[1].intervals[0].physical_row
+        assert surface.current_layout.hit_test(5, plot_y) is chart
+        surface.on_mouse_move(_mouse_event(
+            events.MouseMove, surface, 6, plot_y - int(surface.scroll_y),
+        ))
+        assert surface.hovered_presentation is candles[1]
+        assert screen.documentation_line.sentence == (
+            "CANDLE 2026-09-22 (fell) • Left: show • Right: no menu"
+        )
+        line = surface._line_texts[plot_y]
+        console = Console(width=100)
+        for column, reverse in ((2, False), (3, False), (4, False),
+                                (5, False), (6, True), (7, True), (8, True),
+                                (9, False)):
+            assert line.get_style_at_offset(console, column).reverse is reverse
+        surface.on_mouse_move(_mouse_event(
+            events.MouseMove, surface, 5, plot_y - int(surface.scroll_y),
+        ))
+        assert surface.hovered_presentation is chart
+        assert screen.documentation_line.sentence == (
+            "CHART AAPL • Left: no action • Right: no menu"
+        )
+        assert calls == [ticker]
 
 
 @pytest.mark.asyncio

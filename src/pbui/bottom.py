@@ -10,6 +10,7 @@ import pandas as pd
 import yfinance as yf
 
 from pbui.commands import HeadlessListener
+from pbui.chart import Candle, Chart
 from pbui.domain import (
     DirectoryListing, DirectoryRef, FileRef, ProcessListing,
     ProcessListingMember, ProcessRef, escape_display,
@@ -70,6 +71,8 @@ def _domain_kind(listener: HeadlessListener, presentation: Presentation | None) 
         (types.python_input, PythonInput, "PythonInput"),
         (types.command_input, CommandInput, "CommandInput"),
         (types.menu_action_input, MenuActionInput, "MenuActionInput"),
+        (types.chart, Chart, "Chart"),
+        (types.candle, Candle, "Candle"),
         (types.tutorial_card, TutorialCard, "TutorialCard"),
         (types.tutorial_target, TutorialTarget, "TutorialTarget"),
         (types.tutorial_try, TutorialExample, "TutorialTry"),
@@ -142,6 +145,12 @@ def _target(listener: HeadlessListener, presentation: Presentation | None) -> st
         return "COMMAND INPUT"
     if kind == "MenuActionInput":
         return f"ACTION “{escape_display(presentation.value.label)}”"
+    if kind == "Chart":
+        return f"CHART {escape_display(str(presentation.value.symbol))}"
+    if kind == "Candle":
+        candle = presentation.value
+        direction = "rose" if candle.close >= candle.open else "fell"
+        return f"CANDLE {candle.date} ({direction})"
     if kind == "Value":
         value = presentation.value
         if isinstance(value, yf.Ticker):
@@ -298,6 +307,8 @@ def format_documentation(
         return _clauses(target, "take column", right)
     if kind == "PandasRow":
         return _clauses(target, "take row", right)
+    if kind == "Candle":
+        return _clauses(target, "show", right)
     if kind == "Value" and isinstance(presentation.value, pd.DataFrame):
         return _clauses(target, "show frame preview", right)
     if kind == "Value" and isinstance(presentation.value, pd.Series):

@@ -94,7 +94,9 @@ def test_clicks_leave_history_seam_idle_and_invalid_source_cannot_fetch(tmp_path
     listener = listener_at(tmp_path, lambda ticker: calls.append(ticker) or frame_with_close(), max_rows=4)
     ticker = TickerStandIn()
     source = present_ticker(listener, ticker)
-    assert tuple(action.label for action in listener.python_translators_for(source)) == ("history",)
+    assert tuple(action.label for action in listener.python_translators_for(source)) == (
+        "history", "candlestick",
+    )
     assert listener.select_for_input(source)
     assert drawings(listener)[-1] == "TickerStandIn: ticker stand-in"
     assert calls == []
@@ -198,7 +200,7 @@ def test_headless_imports_do_not_import_textual():
     assert result.returncode == 0, result.stderr
 
 
-def test_menu_history_is_only_ticker_action_and_records_each_result(tmp_path):
+def test_menu_history_records_each_result_with_chart_action_available(tmp_path):
     first, second = frame_with_close(), frame_with_close()
     calls = []
 
@@ -209,7 +211,9 @@ def test_menu_history_is_only_ticker_action_and_records_each_result(tmp_path):
     listener = listener_at(tmp_path, history)
     ticker = TickerStandIn()
     source = present_ticker(listener, ticker)
-    assert tuple(action.label for action in listener.python_translators_for(source)) == ("history",)
+    assert tuple(action.label for action in listener.python_translators_for(source)) == (
+        "history", "candlestick",
+    )
     listener.submit("42")
     assert listener.python_translators_for(values(listener)[-1]) == ()
     assert calls == []

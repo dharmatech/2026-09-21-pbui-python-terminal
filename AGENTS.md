@@ -72,6 +72,8 @@ The pandas specification is accepted and implemented through pandas 001.
 The records specification is accepted and implemented through records 001.
 The ticker specification is accepted and implemented through ticker 001.
 Its charter is the original assignment, not the current law.
+The chart specification is accepted and implemented through chart 001.
+Its charter is the original assignment, not the current law.
 `docs/design/implementation/bottom/checkpoints/003-remove-no-target-wording.md`
 is ready to implement and is not part of the history work.
 `docs/design/implementation/history/charter.md` is the open
