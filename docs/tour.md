@@ -2,9 +2,10 @@
 
 This file is the working manuscript of the pbui tour. It is the ordered
 path a new person walks: Listener, SymPy, HTTP, JSON, DataFrames, and
-stock data. Each subject is a few card-sized stops. Objects from earlier
-stops stay in the session, and later stops say what they expect to find
-already there.
+stock data with a candlestick chart. Start `uv run pbui` from the project
+root and stay in that session for the whole path. Each subject is a few
+card-sized stops. Objects from earlier stops stay in the session, and
+later stops say what they expect to find already there.
 
 The live cards behind `:tutorial` are the reader. This file is the
 manuscript those cards can be cut from. [`user-guide.md`](user-guide.md)
@@ -49,41 +50,27 @@ when an edit would:
 
 - add or drop a subject
 - reorder the subjects
-- resolve an item under [Direction still open](#direction-still-open)
+- change a decision under [Tour direction](#tour-direction)
 - describe a command, menu, or object that has no accepted spec and is
   not reserved in this file
 - change how this tour relates to `:tutorial` or to the user guide
 
 Leaves inside a subject that is already on the path are editor work,
-including the first leaves under JSON and DataFrames. Stock data is
-reserved and has no leaves until direction names the behavior.
+including JSON, DataFrames, and Stock data. Stock data uses the
+implemented ticker and chart behavior.
 
-## Direction still open
+## Tour direction
 
-These stay as written until the direction conversation decides them.
+HTTP and JSON use the USGS earthquake feed for digging. DataFrames
+starts a second request to the Treasury debt table and converts its
+flat `data` array, not the earthquake `features`.
 
-The live HTTP cards fetch the USGS 2.5-day earthquake feed. Its
-`features` are nested, so they are a poor direct `To DataFrame`
-example. The records series uses a Treasury `debt_to_penny` GET whose
-`data` member is a flat array of objects, with `record_date` and
-`tot_pub_debt_out_amt`. The tour has not chosen whether one request
-carries the reader from HTTP through DataFrames, or whether DataFrames
-starts from a second request. The URLs already fixed elsewhere are:
+The four live HTTP leaves stay in place. The JSON subject practices
+their general dig gesture on the earthquake value already in history;
+it starts no new request.
 
-```text
-:get https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson
-:get https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od/debt_to_penny?sort=-record_date&page[size]=10&fields=record_date,tot_pub_debt_out_amt
-```
-
-The live HTTP section already contains JSON browsing, in "3. Open JSON"
-and "4. Browse and reuse". This manuscript also has a JSON subject
-after HTTP. How those two accounts share the dig, and whether the
-manuscript's HTTP subject keeps those two leaves, is undecided. Leave
-the four HTTP leaves in place.
-
-Stock data is a reserved subject. There is no ticker, price history,
-indicator, or chart in the program, and no accepted spec for one.
-Write no leaves under it.
+Stock data uses the retained `yfinance.Ticker`, its `candlestick` chart,
+and its `history` DataFrame. An ordinary DataFrame has no plot action.
 
 ## Path
 
@@ -94,10 +81,11 @@ Write no leaves under it.
 5. [DataFrames](#dataframes)
 6. [Stock data](#stock-data)
 
-`:tutorial` still opens "1. Presentations". In the listener, Contents
+Enter `:tutorial` to open "1. Presentations". In the listener, Contents
 lists Listener, SymPy, and HTTP. JSON, DataFrames, and stock data are
-subjects of this manuscript. They are not Contents entries until a
-later tutorial series adds them.
+subjects of this manuscript; continue them in the same listener
+session. They are not Contents entries until a later tutorial series
+adds them.
 
 ## Listener
 
@@ -109,6 +97,10 @@ directory, click a retained value, insert that value into an
 expression, open a menu, and bring a submitted line back. SymPy starts
 from an ordinary Python prompt. It does not need a file or a process
 from these cards.
+
+At an empty prompt, Up recalls an earlier submission; Tab completes a
+name as you type, and Ctrl-G clears the line loaded by the last card
+before SymPy.
 
 ### 1. Presentations
 
@@ -183,14 +175,16 @@ See also: the [transcript demo](design/implementation/transcript/demo.md).
 
 ## SymPy
 
-Tryable. These four leaves are the live SymPy section. The section
-card names simplify, expand, and factor. Simplify has no leaf. Keep
-it that way.
+Tryable. The first four leaves are the live SymPy section. The next
+two are manuscript stops for building expressions by clicking retained
+values. The section card names simplify, expand, and factor. Simplify
+has no leaf. Keep it that way.
 
 The reader imports SymPy, binds `x` to a symbol, and keeps an expanded
-expression and a factored expression in history. HTTP does not use
-those expressions. They stay in the session so later subjects can show
-older objects still present beside newer ones.
+expression and a factored expression in history. The reader then uses
+one of those rows to build a product and reuses that product in a
+quotient. HTTP does not use those expressions. They stay in the
+session so later subjects can show older objects beside newer ones.
 
 ### 1. Import
 
@@ -243,10 +237,40 @@ Try: `x**2 - 1`
 
 Holding: `x**2 - 1` and its `(x - 1)⋅(x + 1)` result.
 
-Next: [HTTP](#http), in manuscript order. Live Next on this card
-stops here.
+Next: [5. Multiply a retained expression](#5-multiply-a-retained-expression),
+in manuscript order. Live Next on this card stops here.
 
 See also: the [SymPy demo](design/implementation/sympy/demo.md#5-try-factor-and-simplify).
+
+### 5. Multiply a retained expression
+
+Tryable. At an empty prompt, type `x * (` and click the expanded
+`x**2 + 2*x + 1` row from card 3. The click inserts a chip for that
+exact expression; type `)` and press Enter to add the product to
+history without retyping the polynomial.
+
+Try: none.
+
+Holding: the expanded expression and the new product with `x`.
+
+Next: [6. Divide the product](#6-divide-the-product)
+
+See also: the [chips demo](design/implementation/chips/demo.md).
+
+### 6. Divide the product
+
+Tryable. Bind `y`, then type `(` at an empty prompt and click the
+product row from the previous stop. Type `) / y` and press Enter to
+make a quotient from that retained product; the product stays in
+history alongside it.
+
+Try: `y = sympy.Symbol("y")`
+
+Holding: the product, its quotient by `y`, and the bound `y` symbol.
+
+Next: [HTTP](#http), in manuscript order.
+
+See also: the [SymPy demo](design/implementation/sympy/demo.md#4-use-the-menu-result-as-a-python-object).
 
 ## HTTP
 
@@ -256,11 +280,9 @@ The request, the response, and the parsed JSON stay as separate rows.
 The feed may fail or return a response without a usable `json` action;
 in that case the browsing steps wait for a JSON response.
 
-What this subject leaves for JSON depends on the open choice of feed.
-With the live cards, the reader can be holding the USGS `JsonObject`,
-its `metadata`, and its `features`. A DataFrame subject that wants a
-flat array of records needs a different retained array than those
-features. See [Direction still open](#direction-still-open).
+On a successful JSON response, these cards leave the USGS `JsonObject`,
+its `metadata`, and its `features` in history. JSON continues with that
+earthquake value; DataFrames later starts a separate Treasury request.
 
 ### 1. Make a request
 
@@ -293,40 +315,41 @@ See also: the [HTTP demo](design/implementation/http/demo.md).
 
 ### 3. Open JSON
 
+Open the response row's menu and choose `json`. Click the new
+`JsonObject` summary with an empty prompt to list root members, then
+click `["metadata"]` to read its title and count.
+
 Try: none. The menu action on the response is json.
 
-Holding:
+Holding: the response, parsed earthquake object, and `metadata` members.
 
 Next: [4. Browse and reuse](#4-browse-and-reuse)
 
-See also:
+See also: the [HTTP demo](design/implementation/http/demo.md).
 
 ### 4. Browse and reuse
 
+Click `["features"]` among the root members to list the array. If
+`[0]` appears, click it and then `["properties"]` to read `place` and
+`mag`; counts and place names are live. To reuse a JSON collection,
+type `len(`, click its row, type `)`, and press Enter.
+
 Try: none.
 
-Holding:
+Holding: the earthquake root, its dug members, and a length result if run.
 
 Next: [JSON](#json), in manuscript order. Live Next on this card
 stops here.
 
-See also:
+See also: the [HTTP demo](design/implementation/http/demo.md).
 
 ## JSON
 
-Tryable. These stops use any retained `JsonObject` or `JsonArray`.
-The HTTP leaves above provide one example, but this subject does not
-choose which JSON value leads into DataFrames.
+Tryable. These stops practice the general dig gesture on the
+earthquake JSON already in history. No new request starts here, and
+this value is not the one DataFrames converts.
 
-The DataFrames subject expects a `JsonArray` whose elements are
-`JsonObject`s, or one `JsonObject`. Nested values stay cells if that
-value later becomes a frame. Do not teach `json_normalize`, and do not
-flatten nested fields. Do not remove or rewrite the HTTP leaves
-"3. Open JSON" and "4. Browse and reuse" while the overlap above is
-still open.
-
-Holding, for the subject: a JSON value the next subject can turn into
-a frame, once the feed question is settled.
+Holding, for the subject: the retained earthquake JSON and its dug members.
 
 Next: [DataFrames](#dataframes)
 
@@ -334,9 +357,10 @@ See also: [HTTP](#http) and the [records demo](design/implementation/records/dem
 
 ### 1. List one level
 
-With the editor empty, click a retained `JsonObject` or `JsonArray`.
-Its immediate members appear as new rows, up to 100 at a time; the
-collection summary stays in history.
+With the editor empty, click the retained earthquake `JsonObject` or
+one of its `JsonArray` members; start no new request. Its immediate
+members appear as new rows, up to 100 at a time, while the collection
+summary stays in history.
 
 Try: none.
 
@@ -350,12 +374,13 @@ See also: [3. Open JSON](#3-open-json).
 
 Click a member row whose value is another JSON collection. Its key or
 index and its value are one click target, so this adds that value's
-immediate members. A scalar member instead shows ordinary value detail.
+immediate members without another request. A scalar member instead
+shows ordinary value detail; DataFrames will convert the Treasury
+`data` array, not this earthquake value.
 
 Try: none.
 
-Holding: the nested collection and its newly listed members. The
-specific value for DataFrames is still undecided.
+Holding: the earthquake collection and its newly listed members.
 
 Next: [DataFrames](#dataframes), in manuscript order.
 
@@ -363,27 +388,15 @@ See also: [4. Browse and reuse](#4-browse-and-reuse).
 
 ## DataFrames
 
-The five leaves below are drafted as a tour path. The pandas and
-records interactions are implemented, but the JSON source that hands
-the reader a flat array of records is still an open direction choice.
+Tryable. Start a new Treasury request in the same session; the
+earthquake JSON remains a browsing example. The Treasury `data` member
+is the flat array of records this subject converts. If the request
+fails, the frame steps wait, and Stock data can still follow.
 
-Behavior those leaves may use:
-
-- A DataFrame or Series stays a live object. A left click on the
-  summary appends a positional snapshot and leaves the summary in
-  place. A column heading yields that column as a Series. A row label
-  yields a one-row DataFrame. A Series click lists values as text.
-- `To DataFrame` is a menu action on a `JsonObject`, or on a
-  `JsonArray` of `JsonObject`s. The source stays in history.
-- `To JSON records` is a menu action on a whole DataFrame. The index
-  is omitted. The source frame stays in history.
-- Sorting and filtering a frame are ordinary pandas expressions. This
-  tour does not add a sort or filter menu.
-
-The records hand check digs to the Treasury `data` array and then uses
-`To DataFrame`. Amounts there are text unless the JSON numbers were
-already numeric. Do not promise a particular date, amount, or row
-count. A `Series` has no `To DataFrame` or `To JSON records` action.
+A DataFrame or Series stays a live object. The frame preview and its
+column and row hits are positional snapshots. Sorting and filtering
+are ordinary pandas expressions, with no sort or filter menu here.
+Only a whole DataFrame, not a Series, has `To JSON records`.
 
 Holding, for the subject: a DataFrame the reader can preview, slice
 by column or row, and turn back into JSON records.
@@ -393,23 +406,67 @@ Next: [Stock data](#stock-data)
 See also: the [records demo](design/implementation/records/demo.md) and
 the [pandas demo](design/implementation/pandas/demo.md).
 
-### 1. Make a frame
+### 1. Request the debt table
 
-Drafted. Once the chosen JSON path leaves a `JsonArray` of
-`JsonObject` records, open that array's menu and choose `To DataFrame`.
-One `JsonObject` also qualifies. The source stays in history.
+Tryable. Enter the Treasury `:get` command as one line. It adds a
+retained GET request without fetching; this is separate from the
+earthquake request above.
 
-Try: none.
+Try: `:get https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od/debt_to_penny?sort=-record_date&page[size]=10&fields=record_date,tot_pub_debt_out_amt`
 
-Holding: the eligible JSON source and its new DataFrame.
+Holding: the Treasury GET request row.
 
-Next: [2. Preview the frame](#2-preview-the-frame)
+Next: [2. Perform the debt GET](#2-perform-the-debt-get)
 
 See also: the [records demo](design/implementation/records/demo.md).
 
-### 2. Preview the frame
+### 2. Perform the debt GET
 
-Drafted. Click the DataFrame summary with an empty editor. A bounded
+Tryable. Open that GET row's menu and choose `perform` to make the
+Treasury request. The request stays, and a response appears on
+success. The records hand check could not resolve this API domain; if
+one Error appears, the following frame steps wait.
+
+Try: none.
+
+Holding: the request and, on success, its response.
+
+Next: [3. Open the debt JSON](#3-open-the-debt-json)
+
+See also: [2. Perform the GET](#2-perform-the-get).
+
+### 3. Open the debt JSON
+
+Tryable. Choose `json` on the response, left-click the resulting
+`JsonObject` to list its members, then left-click `["data"]`. The
+retained `JsonArray` contains the debt records and offers a menu.
+
+Try: none.
+
+Holding: the Treasury response, root object, and `data` record array.
+
+Next: [4. Make a frame](#4-make-a-frame)
+
+See also: [1. List one level](#1-list-one-level).
+
+### 4. Make a frame
+
+Tryable. Choose `To DataFrame` on the `data` array's menu. The array
+stays; the new frame has one row per returned record and columns
+including `record_date` and `tot_pub_debt_out_amt`. Amounts remain
+text when the JSON supplied strings; dates, amounts, and counts vary.
+
+Try: none.
+
+Holding: the Treasury record array and its new DataFrame.
+
+Next: [5. Preview the frame](#5-preview-the-frame)
+
+See also: the [records demo](design/implementation/records/demo.md).
+
+### 5. Preview the frame
+
+Tryable. Click the DataFrame summary with an empty editor. A bounded
 snapshot appears below it, showing up to 12 rows and 6 columns. The
 summary keeps the live frame; the preview keeps its captured values.
 
@@ -417,13 +474,13 @@ Try: none.
 
 Holding: the DataFrame and its captured preview.
 
-Next: [3. Take a column](#3-take-a-column)
+Next: [6. Take a column](#6-take-a-column)
 
 See also: the [pandas demo](design/implementation/pandas/demo.md).
 
-### 3. Take a column
+### 6. Take a column
 
-Drafted. Click a column heading in the preview to append that
+Tryable. Click a column heading in the preview to append that
 position's Series. Click its summary with an empty editor to list up
 to 12 values as text. The preview and original frame remain.
 
@@ -431,13 +488,13 @@ Try: none.
 
 Holding: the frame, preview, extracted Series, and listed values.
 
-Next: [4. Take a row](#4-take-a-row)
+Next: [7. Take a row](#7-take-a-row)
 
 See also: the [pandas demo](design/implementation/pandas/demo.md#3-take-the-second-column-and-list-it).
 
-### 4. Take a row
+### 7. Take a row
 
-Drafted. Click a row label in the captured preview to append a
+Tryable. Click a row label in the captured preview to append a
 one-row DataFrame. That result is a separate frame; the original
 summary and preview stay in history.
 
@@ -445,13 +502,13 @@ Try: none.
 
 Holding: the original frame, its preview, and a one-row frame.
 
-Next: [5. Return to JSON records](#5-return-to-json-records)
+Next: [8. Return to JSON records](#8-return-to-json-records)
 
 See also: the [pandas demo](design/implementation/pandas/demo.md#5-take-a-row-then-change-the-source-frame).
 
-### 5. Return to JSON records
+### 8. Return to JSON records
 
-Drafted. Open the original whole frame's menu and choose
+Tryable. Open the original whole frame's menu and choose
 `To JSON records`. The new `JsonArray` holds one `JsonObject` per frame
 row; its index is omitted. Click the array to list its immediate records.
 
@@ -465,9 +522,90 @@ See also: the [records demo](design/implementation/records/demo.md).
 
 ## Stock data
 
-Reserved. No leaves.
+Tryable. A retained `yfinance.Ticker` can request a candlestick chart
+or a daily price DataFrame. Both actions make live Yahoo requests, so
+their results may differ. In the chart series' AAPL hand check,
+`candlestick` appended `no prices` and `history` still appended a frame.
 
-This stop is where a later price history could arrive as a DataFrame
-and sit beside the frames from the previous subject. No source,
-command, or card is chosen. Write nothing under this heading until
-the direction conversation names the behavior.
+### 1. Import
+
+Import yfinance into this listener's Python namespace. Enter retains
+the input line but adds no ticker value yet.
+
+Try: `import yfinance`
+
+Holding: the `yfinance` name bound, with an empty editor.
+
+Next: [2. Make a ticker](#2-make-a-ticker)
+
+See also: the [ticker demo](design/implementation/ticker/demo.md).
+
+### 2. Make a ticker
+
+Evaluate the expression to keep a `Ticker AAPL` value in history.
+Hovering it does not fetch prices; with an empty prompt, a left click
+shows its detail without fetching either.
+
+Try: `yfinance.Ticker("AAPL")`
+
+Holding: the retained `Ticker AAPL` value.
+
+Next: [3. Show the chart](#3-show-the-chart)
+
+See also: the [ticker demo](design/implementation/ticker/demo.md).
+
+### 3. Show the chart
+
+Right-click that ticker and choose `candlestick`, below `history`.
+On success, a 60-cell chart shows `Ticker AAPL`, 12 candle rows, an
+axis, and first and last visible dates: the newest 15 daily bars run
+oldest to newest from left to right, with a trailer for omitted days.
+Green candles rose or stayed flat; red candles fell. Use a terminal
+at least 62 cells wide to see the drawing past its history indent.
+If `no prices` or one Error appears, keep the ticker and continue to
+[Prices as a frame](#5-prices-as-a-frame).
+
+Try: none.
+
+Holding: the ticker and a chart, or the `no prices` or Error row.
+
+Next: [4. Read a candle](#4-read-a-candle)
+
+See also: the [chart demo](design/implementation/chart/demo.md).
+
+### 4. Read a candle
+
+If a chart appeared, point at a three-cell candle to read its date
+and rose or fell status on the documentation line. With an empty
+editor, click it to append captured date, Open, High, Low, and Close;
+the chart stays. Pointing at a gap names the chart; with an empty
+editor, clicking it appends nothing. While typing a Python expression,
+clicking a candle inserts a `Candle YYYY-MM-DD` chip; clear that
+unfinished line with Ctrl-G before continuing.
+
+Try: none.
+
+Holding: the chart and one candle detail, when a chart appeared.
+
+Next: [5. Prices as a frame](#5-prices-as-a-frame)
+
+See also: the [chart demo](design/implementation/chart/demo.md).
+
+### 5. Prices as a frame
+
+On the same ticker, choose `history` for another live Yahoo request;
+on success it appends a DataFrame without drawing another chart. If
+it fails, one Error appears and the ticker remains.
+When prices are present, click its summary to preview `Close`; the
+dates are the frame index.
+`To JSON records` on this frame omits that index; `_.reset_index()`
+appends a frame whose dates are a column, so they survive conversion.
+
+Try: `_.reset_index()` after a successful history result.
+
+Holding: the ticker and, on success, a price frame and optional
+date-column frame.
+
+Next: end of the manuscript.
+
+See also: the [ticker demo](design/implementation/ticker/demo.md).
